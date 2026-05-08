@@ -2145,6 +2145,11 @@ fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
 /// variant ("a creature entered...") into one combinator.
 fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let entered_suffix = "entered the battlefield under your control this turn";
+    let had_enter_suffix = "enter the battlefield under your control this turn";
+
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you had ").parse(input) {
+        return parse_entered_this_turn_subject(rest, had_enter_suffix, 1);
+    }
 
     // Branch 1: "N or more [type] entered..."
     if let Ok((after_n, n)) = parse_number(input) {
@@ -2164,15 +2169,24 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         }
     }
 
-    // Branch 2: "a/an [type] entered..."
-    let (type_and_rest, _) = parse_article(input)?;
-    let (rest, type_text) = take_until(entered_suffix).parse(type_and_rest)?;
-    let (rest, _) = tag(entered_suffix).parse(rest)?;
+    // Branch 2: "a/an/another [type] entered..."
+    parse_entered_this_turn_subject(input, entered_suffix, 1)
+}
+
+fn parse_entered_this_turn_subject<'a>(
+    input: &'a str,
+    suffix: &'static str,
+    count: u32,
+) -> OracleResult<'a, StaticCondition> {
+    let (rest, type_text) = take_until(suffix).parse(input)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let type_text = type_text.trim();
+    let _ = alt((parse_article, value((), tag("another ")))).parse(type_text)?;
     let (filter, _) = parse_type_phrase(type_text.trim());
     let filter = inject_controller_you(filter);
     Ok((
         rest,
-        make_quantity_ge(QuantityRef::EnteredThisTurn { filter }, 1),
+        make_quantity_ge(QuantityRef::EnteredThisTurn { filter }, count),
     ))
 }
 
@@ -3400,6 +3414,62 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => {}
             other => panic!("expected EnteredThisTurn GE 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_entered_this_turn_another_subtype() {
+        let (rest, c) = parse_inner_condition(
+            "another knight entered the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::EnteredThisTurn {
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(filter
+                    .type_filters
+                    .contains(&TypeFilter::Subtype("Knight".to_string())));
+                assert!(filter.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected another Knight EnteredThisTurn GE 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_had_another_enter_this_turn() {
+        let (rest, c) = parse_inner_condition(
+            "you had another creature enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::EnteredThisTurn {
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+                assert!(filter.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected another creature EnteredThisTurn GE 1, got {other:?}"),
         }
     }
 
