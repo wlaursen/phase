@@ -1181,6 +1181,7 @@ impl GameRunner {
             WaitingFor::ExileFromBattlefieldForManaAbility { .. } => {
                 "ExileFromBattlefieldForManaAbility"
             }
+            WaitingFor::SacrificeForManaAbility { .. } => "SacrificeForManaAbility",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::ExileForCost { .. } => "ExileForCost",

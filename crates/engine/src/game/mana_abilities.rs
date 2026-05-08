@@ -344,6 +344,7 @@ pub fn activate_mana_ability(
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         },
         events,
@@ -586,6 +587,46 @@ pub fn handle_exile_from_battlefield_for_mana_ability(
     advance_mana_ability_activation(state, updated, events)
 }
 
+/// CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Complete the
+/// sacrifice-from-battlefield mana-ability cost selection (Phyrexian Altar class).
+/// Captures the cost-paid object's public characteristics before sacrifice so
+/// mana production can reference the sacrificed object's mana value when needed.
+pub fn handle_sacrifice_for_mana_ability(
+    state: &mut GameState,
+    count: usize,
+    legal_permanents: &[ObjectId],
+    pending: &PendingManaAbility,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must sacrifice exactly {} permanent(s), got {}",
+            count,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_permanents.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected permanent not eligible for mana ability sacrifice cost".to_string(),
+            ));
+        }
+    }
+
+    let captured = chosen.first().and_then(|id| {
+        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
+            object_id: *id,
+            lki: obj.snapshot_for_mana_spent(),
+        })
+    });
+
+    let mut updated = pending.clone();
+    updated.chosen_sacrificed_battlefield = chosen.to_vec();
+    updated.cost_paid_object = captured;
+    advance_mana_ability_activation(state, updated, events)
+}
+
 pub fn handle_discard_for_mana_ability(
     state: &mut GameState,
     count: usize,
@@ -727,6 +768,27 @@ fn advance_mana_ability_activation(
         }
     }
 
+    // CR 117.1 + CR 118.3: Non-self sacrifice-from-battlefield as a mana
+    // ability cost (Phyrexian Altar class). Surface the player choice before
+    // producing mana so the selected permanent is sacrificed as the cost.
+    if pending.chosen_sacrificed_battlefield.is_empty() {
+        if let Some((count, permanents)) =
+            sacrifice_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+        {
+            if permanents.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible permanents to sacrifice for mana ability cost".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::SacrificeForManaAbility {
+                player: pending.player,
+                count,
+                permanents,
+                pending_mana_ability: Box::new(pending),
+            });
+        }
+    }
+
     // CR 605.3a + CR 601.2h + CR 107.4e: Resolve the mana sub-cost payment before
     // producing any mana or prompting for output choices. If the cost has hybrid
     // shards (CR 107.4e) with more than one legal color assignment given the
@@ -783,6 +845,7 @@ fn advance_mana_ability_activation(
                 &mut pending.chosen_tappers.iter().copied(),
                 &mut pending.chosen_discards.iter().copied(),
                 &mut pending.chosen_exiled_battlefield.iter().copied(),
+                &mut pending.chosen_sacrificed_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
             )?;
             // CR 603.2a + CR 603.2g + CR 605.3b: Cost-payment events (Tap,
@@ -821,6 +884,7 @@ fn advance_mana_ability_activation(
         &pending.chosen_tappers,
         &pending.chosen_discards,
         &pending.chosen_exiled_battlefield,
+        &pending.chosen_sacrificed_battlefield,
         pending.chosen_mana_payment.as_deref(),
         pending.cost_paid_object,
     )?;
@@ -846,6 +910,7 @@ fn pay_mana_ability_cost(
         &mut std::iter::empty(),
         &mut std::iter::empty(),
         &mut std::iter::empty(),
+        &mut std::iter::empty(),
         None,
     )
 }
@@ -861,12 +926,14 @@ fn resolve_mana_ability_with_selected_choices(
     tapped_creatures: &[ObjectId],
     discarded_cards: &[ObjectId],
     exiled_battlefield: &[ObjectId],
+    sacrificed_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
     let mut exiled = exiled_battlefield.iter().copied();
+    let mut sacrificed = sacrificed_battlefield.iter().copied();
     pay_mana_ability_cost_with_choices(
         state,
         source_id,
@@ -876,6 +943,7 @@ fn resolve_mana_ability_with_selected_choices(
         &mut chosen,
         &mut discarded,
         &mut exiled,
+        &mut sacrificed,
         chosen_hybrid_payment,
     )?;
     if chosen.next().is_some() {
@@ -891,6 +959,11 @@ fn resolve_mana_ability_with_selected_choices(
     if discarded.next().is_some() {
         return Err(EngineError::InvalidAction(
             "Too many cards selected for mana ability cost".to_string(),
+        ));
+    }
+    if sacrificed.next().is_some() {
+        return Err(EngineError::InvalidAction(
+            "Too many permanents selected for mana ability sacrifice cost".to_string(),
         ));
     }
 
@@ -976,7 +1049,7 @@ fn resolve_mana_ability_sub_chain(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pay_mana_ability_cost_with_choices<I, J, K>(
+fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
@@ -985,12 +1058,14 @@ fn pay_mana_ability_cost_with_choices<I, J, K>(
     chosen_tappers: &mut I,
     chosen_discards: &mut J,
     chosen_exiled_battlefield: &mut K,
+    chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
     J: Iterator<Item = ObjectId>,
     K: Iterator<Item = ObjectId>,
+    L: Iterator<Item = ObjectId>,
 {
     match cost {
         Some(AbilityCost::Tap) => tap_source(state, source_id, events)?,
@@ -1067,6 +1142,24 @@ where
                         events,
                     )?;
                 }
+            }
+        }
+        // CR 117.1 + CR 118.3 + CR 605.3b: Non-self sacrifice-from-battlefield
+        // as a mana ability cost (Phyrexian Altar class). The interactive flow
+        // has already captured the chosen permanents; verify each is still
+        // legal and route through the sacrifice replacement pipeline.
+        Some(AbilityCost::Sacrifice { target, count })
+            if !matches!(target, TargetFilter::SelfRef) =>
+        {
+            for _ in 0..*count {
+                let chosen_id = chosen_sacrificed_battlefield.next().ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Missing sacrificed permanent selection for mana ability".to_string(),
+                    )
+                })?;
+                sacrifice_selected_permanent_for_mana_cost(
+                    state, source_id, player, chosen_id, target, events,
+                )?;
             }
         }
         // CR 118.3 + CR 605.3b: Self-exile mana ability costs are paid
@@ -1199,6 +1292,20 @@ where
                         ..
                     } => {
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
+                    }
+                    AbilityCost::Sacrifice { target, count } => {
+                        for _ in 0..*count {
+                            let chosen_id =
+                                chosen_sacrificed_battlefield.next().ok_or_else(|| {
+                                    EngineError::InvalidAction(
+                                        "Missing sacrificed permanent selection for mana ability"
+                                            .to_string(),
+                                    )
+                                })?;
+                            sacrifice_selected_permanent_for_mana_cost(
+                                state, source_id, player, chosen_id, target, events,
+                            )?;
+                        }
                     }
                     AbilityCost::Exile {
                         filter: Some(TargetFilter::SelfRef),
@@ -1635,6 +1742,32 @@ fn exile_from_battlefield_cost_choice(
     Some((count as usize, permanents))
 }
 
+fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::Sacrifice { target, count } if !matches!(target, TargetFilter::SelfRef) => {
+            Some((*count, target))
+        }
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice_cost),
+        _ => None,
+    }
+}
+
+/// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
+/// for an `AbilityCost::Sacrifice { target: !SelfRef }` mana ability cost.
+/// Delegates eligibility to the casting cost helper so mana and non-mana
+/// activation costs share the same battlefield/controller/filter semantics.
+fn sacrifice_cost_choice(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+) -> Option<(usize, Vec<ObjectId>)> {
+    let (count, filter) = find_non_self_sacrifice_cost(cost.as_ref()?)?;
+    let permanents =
+        super::casting::find_eligible_sacrifice_targets(state, player, source_id, filter);
+    Some((count as usize, permanents))
+}
+
 fn find_non_self_discard_cost(
     cost: &AbilityCost,
 ) -> Option<(&crate::types::ability::QuantityExpr, Option<&TargetFilter>)> {
@@ -1725,6 +1858,38 @@ fn discard_selected_card_for_mana_cost(
     match crate::game::effects::discard::discard_as_cost(state, chosen_id, player, events) {
         crate::game::effects::discard::DiscardOutcome::Complete => Ok(()),
         crate::game::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => Ok(()),
+    }
+}
+
+fn sacrifice_selected_permanent_for_mana_cost(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    chosen_id: ObjectId,
+    filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let obj = state.objects.get(&chosen_id).ok_or_else(|| {
+        EngineError::InvalidAction("Selected permanent for sacrifice cost not found".to_string())
+    })?;
+    if obj.zone != Zone::Battlefield || obj.controller != player {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected permanent is not on the battlefield under your control".to_string(),
+        ));
+    }
+    if !matches_target_filter(
+        state,
+        chosen_id,
+        filter,
+        &FilterContext::from_source(state, source_id),
+    ) {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected permanent does not match the sacrifice cost filter".to_string(),
+        ));
+    }
+    match sacrifice::sacrifice_permanent(state, chosen_id, player, events)? {
+        sacrifice::SacrificeOutcome::Complete => Ok(()),
+        sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => Ok(()),
     }
 }
 
@@ -3337,6 +3502,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
@@ -3396,6 +3562,7 @@ mod tests {
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
                 chosen_exiled_battlefield: Vec::new(),
+                chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
             };
             let prompt = ManaChoicePrompt::SingleColor {
@@ -3621,6 +3788,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::Combination {
@@ -3719,6 +3887,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::Combination {
@@ -4073,6 +4242,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
@@ -4279,6 +4449,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
@@ -4537,6 +4708,33 @@ mod tests {
         })
     }
 
+    fn make_phyrexian_altar_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            count: 1,
+        })
+    }
+
     /// Helper: spawn `name` on the battlefield with a printed mana cost
     /// and the Creature core type.
     fn spawn_creature_with_cost(
@@ -4556,6 +4754,148 @@ mod tests {
             };
         }
         id
+    }
+
+    #[test]
+    fn phyrexian_altar_prompts_for_controlled_creature_then_adds_mana() {
+        let mut state = GameState::new_two_player(42);
+        let altar = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Phyrexian Altar".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_phyrexian_altar_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&altar).unwrap().abilities).push(ability.clone());
+
+        let creature = spawn_creature_with_cost(
+            &mut state,
+            PlayerId(0),
+            "Grizzly Bears",
+            ManaCost::generic(2),
+        );
+        let opponent_creature = spawn_creature_with_cost(
+            &mut state,
+            PlayerId(1),
+            "Runeclaw Bear",
+            ManaCost::generic(2),
+        );
+
+        assert!(
+            can_activate_mana_ability_now(&state, PlayerId(0), altar, 0, &ability),
+            "Phyrexian Altar must be activatable when its controller has a creature to sacrifice"
+        );
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            altar,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            Some(ProductionOverride::SingleColor(ManaType::Black)),
+        )
+        .expect("activation should surface the sacrifice choice");
+
+        let pending = match waiting {
+            WaitingFor::SacrificeForManaAbility {
+                player,
+                count,
+                permanents,
+                pending_mana_ability,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert_eq!(permanents, vec![creature]);
+                assert!(!permanents.contains(&opponent_creature));
+                pending_mana_ability
+            }
+            other => panic!("expected SacrificeForManaAbility, got {other:?}"),
+        };
+
+        let result = handle_sacrifice_for_mana_ability(
+            &mut state,
+            1,
+            &[creature],
+            &pending,
+            &[creature],
+            &mut events,
+        )
+        .expect("sacrifice choice should resolve the mana ability");
+
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.objects.get(&creature).unwrap().zone, Zone::Graveyard);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+    }
+
+    #[test]
+    fn sacrifice_creature_mana_cost_can_use_creature_source_itself() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Thermopod".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_phyrexian_altar_ability();
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            Some(ProductionOverride::SingleColor(ManaType::Red)),
+        )
+        .expect("creature source should be eligible to pay its own sacrifice-a-creature cost");
+
+        let pending = match waiting {
+            WaitingFor::SacrificeForManaAbility {
+                count,
+                permanents,
+                pending_mana_ability,
+                ..
+            } => {
+                assert_eq!(count, 1);
+                assert_eq!(permanents, vec![source]);
+                pending_mana_ability
+            }
+            other => panic!("expected SacrificeForManaAbility, got {other:?}"),
+        };
+
+        let result = handle_sacrifice_for_mana_ability(
+            &mut state,
+            1,
+            &[source],
+            &pending,
+            &[source],
+            &mut events,
+        )
+        .expect("source creature should be sacrificed and produce mana");
+
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.objects.get(&source).unwrap().zone, Zone::Graveyard);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
     }
 
     /// (a) Sacrificing a 3-mana-value creature gives 4 mana from Food Chain.
@@ -4592,6 +4932,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let mut events = Vec::new();
@@ -4650,6 +4991,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let mut events = Vec::new();
@@ -4799,6 +5141,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
         };
         let mut events = Vec::new();

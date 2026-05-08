@@ -16,6 +16,8 @@
 //! the enumerations.
 
 use crate::types::ability::{AbilityCost, TargetFilter};
+#[cfg(test)]
+use crate::types::ability::{FilterProp, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -484,18 +486,25 @@ mod tests {
 
     #[test]
     fn sacrifice_non_self_requires_eligible_permanent() {
-        use crate::types::ability::TypedFilter;
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Source", 0, 1).id();
-        // The source itself is excluded from its own eligible set, so with only
-        // the source present, sacrifice-a-creature is unpayable.
         let cost = AbilityCost::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
             count: 1,
         };
-        assert!(!cost.is_payable(&scenario.state, P0, src));
+        assert!(cost.is_payable(&scenario.state, P0, src));
+
+        let another_cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Another]),
+            ),
+            count: 1,
+        };
+        assert!(!another_cost.is_payable(&scenario.state, P0, src));
+
         scenario.add_creature(P0, "Bear", 2, 2);
         assert!(cost.is_payable(&scenario.state, P0, src));
+        assert!(another_cost.is_payable(&scenario.state, P0, src));
     }
 
     #[test]

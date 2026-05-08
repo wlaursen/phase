@@ -4637,7 +4637,8 @@ fn find_pay_life_cost(
 }
 
 /// CR 118.3: Find permanents controlled by `player` matching `filter` on the battlefield.
-/// Excludes `source_id` so the source cannot be sacrificed as its own cost.
+/// The source is eligible when it matches the printed filter; "another" is
+/// represented by `FilterProp::Another` and enforced by `matches_target_filter`.
 pub(super) fn find_eligible_sacrifice_targets(
     state: &GameState,
     player: PlayerId,
@@ -4649,9 +4650,6 @@ pub(super) fn find_eligible_sacrifice_targets(
         .iter()
         .copied()
         .filter(|&id| {
-            if id == source_id {
-                return false;
-            }
             let Some(obj) = state.objects.get(&id) else {
                 return false;
             };

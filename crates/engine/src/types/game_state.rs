@@ -805,6 +805,11 @@ pub struct PendingManaAbility {
     /// `WaitingFor::ExileFromBattlefieldForManaAbility` for the player to pick.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_exiled_battlefield: Vec<ObjectId>,
+    /// CR 117.1 + CR 118.3: Pre-selected battlefield permanents to sacrifice
+    /// as part of an `AbilityCost::Sacrifice { target: !SelfRef }`. Used by
+    /// Phyrexian Altar and the broader sacrifice-for-mana-by-property class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_sacrificed_battlefield: Vec<ObjectId>,
     /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of the
     /// cost-paid object captured before it leaves its zone. Threaded into
     /// `produce_mana_from_ability` so cost-paid-object quantity refs can
@@ -1625,6 +1630,17 @@ pub enum WaitingFor {
         permanents: Vec<ObjectId>,
         pending_mana_ability: Box<PendingManaAbility>,
     },
+    /// CR 117.1 + CR 118.3 + CR 605.3b: Player must choose battlefield
+    /// permanent(s) to sacrifice to pay a mana ability cost. Used by
+    /// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
+    /// and the broader sacrifice-for-mana-by-property class.
+    SacrificeForManaAbility {
+        player: PlayerId,
+        count: usize,
+        /// Pre-filtered eligible battlefield permanents (excludes the mana ability source).
+        permanents: Vec<ObjectId>,
+        pending_mana_ability: Box<PendingManaAbility>,
+    },
     /// CR 605.3a + CR 601.2h + CR 107.4e: A mana ability whose cost is
     /// `Composite { Mana(..), Tap, .. }` (filter lands, Cabal Coffers-style
     /// pay-to-produce abilities) requires the activator to debit mana from
@@ -2071,6 +2087,7 @@ impl WaitingFor {
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
             | WaitingFor::DiscardForManaAbility { player, .. }
             | WaitingFor::ExileFromBattlefieldForManaAbility { player, .. }
+            | WaitingFor::SacrificeForManaAbility { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
             | WaitingFor::ExileForCost { player, .. }
@@ -3997,6 +4014,7 @@ mod tests {
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
                 chosen_exiled_battlefield: Vec::new(),
+                chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
             }),
         };

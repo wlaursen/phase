@@ -449,6 +449,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             permanents,
             ..
         } => select_cards_variants(*player, permanents, Some(*count)),
+        // CR 117.1 + CR 118.3 + CR 605.3b: Phyrexian Altar class — pick which
+        // permanent(s) to sacrifice to pay the mana ability cost.
+        WaitingFor::SacrificeForManaAbility {
+            player,
+            count,
+            permanents,
+            ..
+        } => select_cards_variants(*player, permanents, Some(*count)),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
         } => options
