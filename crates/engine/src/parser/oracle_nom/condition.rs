@@ -42,6 +42,15 @@ pub fn parse_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 /// Useful when the prefix has already been consumed by the caller.
 pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_state_presence_conditions,
+        parse_event_history_conditions,
+        parse_resolution_context_conditions,
+    ))
+    .parse(input)
+}
+
+fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         parse_turn_conditions,
         parse_source_state_conditions,
         parse_player_state_conditions,
@@ -58,19 +67,29 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_there_are_conditions,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
+    ))
+    .parse(input)
+}
+
+fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         parse_entered_this_turn,
         parse_opponent_cast_spell_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
     ))
-    .or(alt((
+    .parse(input)
+}
+
+fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         parse_source_qualified_mana_spent_condition,
         parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_unless_pay_condition,
-    )))
+    ))
     .parse(input)
 }
 
@@ -1231,15 +1250,58 @@ fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you've ").parse(input)?;
     alt((
+        parse_youve_spell_history_condition,
+        parse_youve_card_history_condition,
+        parse_youve_zone_history_condition,
+        parse_youve_life_history_condition,
+        parse_youve_combat_history_condition,
+        parse_youve_player_action_history_condition,
+    ))
+    .parse(rest)
+}
+
+fn parse_youve_spell_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         parse_cast_spell_count_this_turn,
         |input| parse_another_spell_cast_this_turn(input, 2),
         parse_cast_one_spell_this_turn,
-        parse_discarded_card_this_turn_after_actor,
-        parse_sacrificed_this_turn_after_actor,
+        // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
         value(
-            make_quantity_ge(QuantityRef::CrimesCommittedThisTurn, 1),
-            tag("committed a crime this turn"),
+            make_quantity_ge(
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+                2,
+            ),
+            tag("cast two or more spells this turn"),
         ),
+    ))
+    .parse(input)
+}
+
+fn parse_youve_card_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_discarded_card_this_turn_after_actor,
+        parse_youve_drawn_cards_this_turn,
+    ))
+    .parse(input)
+}
+
+fn parse_youve_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_sacrificed_this_turn_after_actor,
+        // "you've descended this turn"
+        value(
+            make_quantity_ge(QuantityRef::DescendedThisTurn, 1),
+            tag("descended this turn"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_youve_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         value(
             make_quantity_ge(
                 QuantityRef::LifeGainedThisTurn {
@@ -1258,34 +1320,31 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             ),
             tag("lost life this turn"),
         ),
-        parse_youve_drawn_cards_this_turn,
-        // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
+    ))
+    .parse(input)
+}
+
+fn parse_youve_combat_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    // "you've attacked this turn" / "you've attacked with a creature this turn"
+    value(
+        make_quantity_ge(QuantityRef::AttackedThisTurn, 1),
+        alt((
+            tag("attacked with a creature this turn"),
+            tag("attacked this turn"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_youve_player_action_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         value(
-            make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
-                    scope: CountScope::Controller,
-                    filter: None,
-                },
-                2,
-            ),
-            tag("cast two or more spells this turn"),
-        ),
-        // "you've attacked this turn" / "you've attacked with a creature this turn"
-        value(
-            make_quantity_ge(QuantityRef::AttackedThisTurn, 1),
-            alt((
-                tag("attacked with a creature this turn"),
-                tag("attacked this turn"),
-            )),
-        ),
-        // "you've descended this turn"
-        value(
-            make_quantity_ge(QuantityRef::DescendedThisTurn, 1),
-            tag("descended this turn"),
+            make_quantity_ge(QuantityRef::CrimesCommittedThisTurn, 1),
+            tag("committed a crime this turn"),
         ),
         parse_player_action_this_turn_body,
     ))
-    .parse(rest)
+    .parse(input)
 }
 
 /// Parse event-state conditions: "a creature died this turn", "you attacked this turn",
