@@ -1398,6 +1398,9 @@ fn parse_enters_with_counters(
             count_expr = qty;
         }
     }
+    if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
+        count_expr = qty;
+    }
 
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
@@ -1477,6 +1480,18 @@ fn parse_enters_with_counters(
     }
 
     Some(def)
+}
+
+fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
+    let (_, (_, qty_text)) = nom_primitives::split_once_on(text, ", where x is ").ok()?;
+    let trimmed = qty_text.trim().trim_end_matches('.');
+    if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
+        return Some(QuantityExpr::Ref { qty: qty_ref });
+    }
+    if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
+        return Some(qty);
+    }
+    crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
 }
 
 fn multiply_counter_count_by_for_each(
@@ -5155,6 +5170,34 @@ mod tests {
                         }
                     ),
                     "count should be CostXPaid, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enters_with_x_counters_where_x_is_life_lost_uses_quantity_binding() {
+        let def = parse_replacement_line(
+            "This creature enters with X +1/+1 counters on it, where X is the total life lost by your opponents this turn.",
+            "Cryptborn Horror",
+        )
+        .unwrap();
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. },
+                        }
+                    ),
+                    "count should use LifeLostThisTurn, got {count:?}"
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),

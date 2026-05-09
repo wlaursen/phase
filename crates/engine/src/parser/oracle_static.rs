@@ -19,7 +19,7 @@ use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::target as nom_target;
-use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
+use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause, parse_quantity_ref};
 use super::oracle_target::{
     parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_target,
     parse_that_clause_suffix, parse_type_phrase,
@@ -3400,7 +3400,7 @@ enum CombatTaxSubject {
 /// Grammar (case-insensitive, leading "creatures " already consumed by nom):
 ///   body      := subject restriction scope? " unless " payer mana_cost suffix?
 ///   subject   := "creatures "
-///   restriction := "can't attack" | "can't block"
+///   restriction := "can't attack" | "can't block" | "can't attack or block"
 ///   scope     := " you" | " you or planeswalkers you control"
 ///   payer     := "their controller pays " | "its controller pays "
 ///   suffix    := " for each of those creatures" dynamic_x?
@@ -3434,9 +3434,19 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     ))
     .parse(input)?;
 
-    let (input, is_attack) = alt((
-        value(true, tag_no_case::<_, _, OracleError<'_>>("can't attack")),
-        value(false, tag_no_case::<_, _, OracleError<'_>>("can't block")),
+    let (input, mode) = alt((
+        value(
+            StaticMode::CantAttackOrBlock,
+            tag_no_case::<_, _, OracleError<'_>>("can't attack or block"),
+        ),
+        value(
+            StaticMode::CantAttack,
+            tag_no_case::<_, _, OracleError<'_>>("can't attack"),
+        ),
+        value(
+            StaticMode::CantBlock,
+            tag_no_case::<_, _, OracleError<'_>>("can't block"),
+        ),
     ))
     .parse(input)?;
 
@@ -3479,12 +3489,12 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     // Optional ", where X is the number of <filter>" — only valid when the base
     // cost carried an {X} shard. Used by Sphere of Safety.
     let (input, dynamic_qty) = opt(parse_dynamic_x_clause).parse(input)?;
-
-    let mode = if is_attack {
-        StaticMode::CantAttack
+    let (input, for_each_qty) = if per_affected.is_none() {
+        opt(parse_for_each_cost_quantity).parse(input)?
     } else {
-        StaticMode::CantBlock
+        (input, None)
     };
+    let dynamic_qty = dynamic_qty.or(for_each_qty);
 
     // Subject-driven affected filter:
     //   - `Creatures` (Ghostly Prison family): opponents' creatures. `ControllerRef::Opponent`
@@ -3548,6 +3558,15 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
             scaling,
         },
     ))
+}
+
+fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
+    let lowered = input.trim_end_matches('.').to_lowercase();
+    let quantity = parse_for_each_clause(&lowered).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    Ok(("", quantity))
 }
 
 /// Parse ", where X is the number of <filter>" → `QuantityRef::ObjectCount {...}`.
@@ -15568,6 +15587,20 @@ mod tests {
             scaling,
             UnlessPayScaling::PerAffectedAndQuantityRef { .. }
         ));
+    }
+
+    /// CR 118.12a: Cowed by Wisdom — aura combat tax scaled by a game-state
+    /// quantity without multiplying by the number of affected creatures.
+    #[test]
+    fn combat_tax_enchanted_creature_for_each_quantity_ref() {
+        let def = parse_static_line(
+            "Enchanted creature can't attack or block unless its controller pays {1} for each card in your hand.",
+        )
+        .expect("Cowed by Wisdom should parse");
+        assert_eq!(def.mode, StaticMode::CantAttackOrBlock);
+        let (cost, scaling) = extract_unless_pay(&def);
+        assert_eq!(cost.mana_value(), 1);
+        assert!(matches!(scaling, UnlessPayScaling::PerQuantityRef { .. }));
     }
 
     /// CR 118.12a + CR 202.3e: Nils, Discipline Enforcer — counter-gated subject

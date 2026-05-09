@@ -4842,7 +4842,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
-        StaticCondition::UnlessPay { .. } => ("UnlessPay", Unhandled),
+        StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander => ("ControlsCommander", Unhandled),
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
@@ -8346,6 +8346,27 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "AbilityCondition::IsYourTurn must classify as Handled",
+        );
+    }
+
+    #[test]
+    fn unless_pay_static_condition_is_marked_handled() {
+        let condition = StaticCondition::UnlessPay {
+            cost: crate::types::mana::ManaCost::generic(1),
+            scaling: crate::types::ability::UnlessPayScaling::PerQuantityRef {
+                quantity: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    card_types: Vec::new(),
+                    scope: CountScope::Controller,
+                },
+            },
+        };
+        let (name, support) = static_condition_feature(&condition);
+        assert_eq!(name, "UnlessPay");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
         );
     }
 }

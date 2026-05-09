@@ -915,7 +915,13 @@ fn extract_unless_pay_modifier(
         {
             return (text.to_string(), None);
         }
-        UnlessCost::Fixed { cost: mana_cost }
+        if let Some(cost) =
+            super::oracle_effect::parse_unless_for_each_payment(&cost_str[cost_end..], &mana_cost)
+        {
+            cost
+        } else {
+            UnlessCost::Fixed { cost: mana_cost }
+        }
     };
 
     // Payer was already determined by the combinator above.
@@ -9898,6 +9904,27 @@ mod tests {
         assert!(
             execute.sub_ability.is_some(),
             "monarch branch should remain available for downstream parsing"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_pay_for_each_uses_dynamic_generic_cost() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this creature unless you pay {1} for each card in your hand.",
+            "Extravagant Spirit",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(
+                unless_pay.cost,
+                UnlessCost::DynamicGeneric {
+                    quantity: QuantityExpr::Ref { .. }
+                }
+            ),
+            "unless payment should use dynamic generic cost, got {:?}",
+            unless_pay.cost
         );
     }
 

@@ -12122,7 +12122,10 @@ fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
     None
 }
 
-fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<UnlessCost> {
+pub(crate) fn parse_unless_for_each_payment(
+    after_cost: &str,
+    cost: &ManaCost,
+) -> Option<UnlessCost> {
     let ManaCost::Cost { shards, generic } = cost else {
         return None;
     };

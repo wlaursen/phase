@@ -1023,6 +1023,22 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ),
         value(
             QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("the total life lost by your opponents this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("total life lost by your opponents this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::Controller,
             },
             tag("total life you lost this turn"),
@@ -2850,6 +2866,19 @@ mod tests {
                 scope: CountScope::Controller,
             }
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_total_life_lost_by_opponents() {
+        let (rest, q) =
+            parse_quantity_ref("the total life lost by your opponents this turn").unwrap();
+        assert!(matches!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent { .. }
+            }
+        ));
         assert_eq!(rest, "");
     }
 
