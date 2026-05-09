@@ -553,6 +553,69 @@ fn draw_replacement_count(
     }
 }
 
+// --- 4b. Scry ---
+
+fn scry_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Scry { count, .. } if *count > 0)
+}
+
+fn scry_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let (player_id, count, applied) = match event {
+        ProposedEvent::Scry {
+            player_id,
+            count,
+            applied,
+        } => (player_id, count, applied),
+        other => return ApplyResult::Modified(other),
+    };
+
+    let execute = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref());
+
+    match execute {
+        Some(ability) if ability.sub_ability.is_none() => match &*ability.effect {
+            Effect::Draw { count: qty, .. } => {
+                let new_count = resolve_event_replacement_quantity(qty, count)
+                    .map(|resolved| resolved.max(0) as u32)
+                    .unwrap_or(count);
+                ApplyResult::Modified(ProposedEvent::Draw {
+                    player_id,
+                    count: new_count,
+                    applied,
+                })
+            }
+            Effect::Scry { count: qty, .. } => {
+                let new_count = resolve_event_replacement_quantity(qty, count)
+                    .map(|resolved| resolved.max(0) as u32)
+                    .unwrap_or(count);
+                ApplyResult::Modified(ProposedEvent::Scry {
+                    player_id,
+                    count: new_count,
+                    applied,
+                })
+            }
+            _ => ApplyResult::Modified(ProposedEvent::Scry {
+                player_id,
+                count,
+                applied,
+            }),
+        },
+        _ => ApplyResult::Modified(ProposedEvent::Scry {
+            player_id,
+            count,
+            applied,
+        }),
+    }
+}
+
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -1289,6 +1352,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: draw_matcher,
             applier: draw_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::Scry,
+        ReplacementHandlerEntry {
+            matcher: scry_matcher,
+            applier: scry_applier,
         },
     );
     registry.insert(ReplacementEvent::DrawCards, stub()); // stays stub (alias for Draw)
@@ -2041,6 +2111,7 @@ pub fn find_applicable_replacements(
                     // gain is replaced. Default (None) = controller only.
                     if let ProposedEvent::LifeGain { player_id, .. }
                     | ProposedEvent::Draw { player_id, .. }
+                    | ProposedEvent::Scry { player_id, .. }
                     | ProposedEvent::Mill { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
@@ -3187,6 +3258,101 @@ mod tests {
             }
             other => panic!("expected Execute with Mill, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn scry_replacement_can_replace_scry_with_draw() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Scry).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::Scry {
+            player_id: PlayerId(0),
+            count: 3,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::Draw { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected Execute with Draw, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scry_replacement_can_modify_scry_count() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Scry).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Scry {
+                    count: QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextAmount,
+                        }),
+                        offset: 1,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::Scry {
+            player_id: PlayerId(0),
+            count: 2,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::Scry { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected Execute with Scry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scry_replacement_defaults_to_controller_scope() {
+        let repl =
+            ReplacementDefinition::new(ReplacementEvent::Scry).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+        let controller_event = ProposedEvent::Scry {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let opponent_event = ProposedEvent::Scry {
+            player_id: PlayerId(1),
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        assert_eq!(
+            find_applicable_replacements(&state, &controller_event, &registry).len(),
+            1
+        );
+        assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
     }
 
     #[test]

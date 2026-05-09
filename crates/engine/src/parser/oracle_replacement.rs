@@ -207,6 +207,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    if let Some(def) = parse_scry_count_replacement(&lower, &text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_mill_count_replacement(&norm_lower, &text) {
         return Some(def);
     }
@@ -2894,6 +2898,69 @@ fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
                 qty: QuantityRef::EventContextAmount,
             },
             tag("that many"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let ((effect_kind, count), rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if you would scry ").parse(input)?;
+        let (input, _) = tag("a number of cards, ").parse(input)?;
+        let (input, effect_kind) = alt((
+            value(ScryReplacementAction::Draw, tag("draw ")),
+            value(ScryReplacementAction::Scry, tag("scry ")),
+        ))
+        .parse(input)?;
+        let (input, count) = parse_scry_replacement_count.parse(input)?;
+        let (input, _) = tag(" instead").parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, (effect_kind, count)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect = match effect_kind {
+        ScryReplacementAction::Draw => Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
+        ScryReplacementAction::Scry => Effect::Scry {
+            count,
+            target: TargetFilter::Controller,
+        },
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Scry)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .description(original_text.to_string()),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ScryReplacementAction {
+    Draw,
+    Scry,
+}
+
+fn parse_scry_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        nom::combinator::map(
+            preceded(tag("that many cards plus "), nom_primitives::parse_number),
+            |value| QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                offset: value as i32,
+            },
+        ),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many cards"),
         ),
     ))
     .parse(input)
@@ -7636,6 +7703,53 @@ mod tests {
                 }
             ),
             other => panic!("expected Mill execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scry_replacement_with_draw_followup() {
+        let text = "If you would scry a number of cards, draw that many cards instead.";
+        let def = parse_replacement_line(text, "Eligeth, Crossroads Augur")
+            .expect("must parse scry replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Scry);
+        let execute = def.execute.as_ref().expect("scry replacement must execute");
+        match &*execute.effect {
+            Effect::Draw { count, target } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                );
+            }
+            other => panic!("expected Draw execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scry_replacement_with_scry_offset_followup() {
+        let text = "If you would scry a number of cards, scry that many cards plus one instead.";
+        let def = parse_replacement_line(text, "Kenessos, Priest of Thassa")
+            .expect("must parse scry replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Scry);
+        let execute = def.execute.as_ref().expect("scry replacement must execute");
+        match &*execute.effect {
+            Effect::Scry { count, target } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }),
+                        offset: 1
+                    }
+                );
+            }
+            other => panic!("expected Scry execute, got {other:?}"),
         }
     }
 }

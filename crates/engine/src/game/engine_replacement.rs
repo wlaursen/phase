@@ -13,6 +13,7 @@ use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::apply_draw_after_replacement;
 use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
 use super::effects::mill::apply_mill_after_replacement;
+use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::apply_sacrifice_after_replacement;
@@ -166,6 +167,10 @@ pub(super) fn handle_replacement_choice(
                 // accounting match the non-choice delivery.
                 draw @ ProposedEvent::Draw { .. } => {
                     apply_draw_after_replacement(state, draw, events);
+                }
+                // CR 701.22a: Scry accepted after replacement choice.
+                scry @ ProposedEvent::Scry { .. } => {
+                    apply_scry_after_replacement(state, scry, events);
                 }
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
