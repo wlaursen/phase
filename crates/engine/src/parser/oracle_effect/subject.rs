@@ -1172,6 +1172,12 @@ fn build_continuous_clause(
     {
         return None;
     }
+    if tag::<_, _, OracleError<'_>>("create ")
+        .parse(normalized.as_str())
+        .is_ok()
+    {
+        return None;
+    }
 
     // Try the full predicate first (simple pump with no compound).
     if let Some((power, toughness, duration)) = super::parse_pump_clause(&normalized) {

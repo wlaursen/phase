@@ -1306,6 +1306,9 @@ pub(crate) fn parse_oracle_ir(
         let is_ability_cost_static = is_ability_activate_cost_static(&lower);
         if !is_ability_cost_static {
             if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
+                if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
+                    merge_kicker_additional_cost(&mut result.additional_cost, cost);
+                }
                 result.extracted_keywords.extend(extracted);
                 i += 1;
                 continue;
@@ -3834,6 +3837,39 @@ mod tests {
     }
 
     #[test]
+    fn keyword_extracted_kicker_and_or_line_sets_two_kicker_costs() {
+        let r = parse_with_keyword_names(
+            "Kicker {G} and/or {1}{U}\n\
+             When you cast this spell, if it was kicked with its {G} kicker, draw a card.\n\
+             When you cast this spell, if it was kicked with its {1}{U} kicker, scry 1.",
+            "Test Kicker",
+            &["Kicker"],
+            &["Creature"],
+            &["Eldrazi"],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Kicker { costs, repeatable } => {
+                assert!(!repeatable);
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 0 }
+                    } if shards == &vec![ManaCostShard::Green]
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 1 }
+                    } if shards == &vec![ManaCostShard::Blue]
+                ));
+            }
+            other => panic!("expected two-cost Kicker, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn multikicker_line_sets_repeatable_kicker_cost() {
         let r = parse(
             "Multikicker {1}{G}\nWhen ~ enters, draw a card.",
@@ -4378,6 +4414,71 @@ mod tests {
             "Mode 4 Token must carry owner=TargetFilter::Player so each modal \
              mode surfaces an independent target slot, got {target:?}",
         );
+    }
+
+    #[test]
+    fn modal_target_player_creates_spawn_tokens_with_quoted_mana_ability() {
+        let r = parse(
+            "Choose two —\n\
+             • Target player creates X 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
+             • Target player scries X, then draws a card.",
+            "Kozilek's Command",
+            &[],
+            &["Kindred", "Instant"],
+            &["Eldrazi"],
+        );
+
+        let first_mode = r.abilities.first().expect("first mode");
+        match &*first_mode.effect {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                count,
+                owner,
+                static_abilities,
+                ..
+            } => {
+                assert_eq!(name, "Eldrazi Spawn");
+                assert_eq!(power, &PtValue::Fixed(0));
+                assert_eq!(toughness, &PtValue::Fixed(1));
+                assert_eq!(
+                    types,
+                    &vec![
+                        "Creature".to_string(),
+                        "Eldrazi".to_string(),
+                        "Spawn".to_string()
+                    ]
+                );
+                assert!(colors.is_empty());
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    } if name == "X"
+                ));
+                assert_eq!(owner, &TargetFilter::Player);
+                assert!(static_abilities.iter().any(|static_definition| {
+                    static_definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::GrantAbility { definition }
+                                if matches!(*definition.effect, Effect::Mana { .. })
+                                    && matches!(
+                                        definition.cost,
+                                        Some(AbilityCost::Sacrifice {
+                                            target: TargetFilter::SelfRef,
+                                            count: 1
+                                        })
+                                    )
+                        )
+                    })
+                }));
+            }
+            other => panic!("expected first mode Token, got {other:?}"),
+        }
     }
 
     #[test]

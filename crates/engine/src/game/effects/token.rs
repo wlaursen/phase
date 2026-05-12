@@ -921,7 +921,7 @@ fn blood_ability() -> AbilityDefinition {
     })
 }
 
-/// CR 106.1 + CR 701.16a: Eldrazi Spawn — "Sacrifice this token: Add {C}."
+/// CR 106.1 + CR 701.21a: Eldrazi Spawn — "Sacrifice this token: Add {C}."
 /// Modern Eldrazi Spawn printings (from Rise of the Eldrazi onward) use this
 /// no-tap sacrifice mana ability. Applied by subtype lookup so every token
 /// with subtype "Spawn" gains the ability without per-card registration.
@@ -1348,8 +1348,16 @@ pub(super) fn inject_predefined_token_abilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::engine::apply_as_current;
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CardType;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -1936,7 +1944,7 @@ mod tests {
 
     #[test]
     fn predefined_spawn_has_colorless_sacrifice_mana_ability() {
-        // CR 106.1 + CR 701.16a: Eldrazi Spawn tokens produced by Writhing
+        // CR 106.1 + CR 701.21a: Eldrazi Spawn tokens produced by Writhing
         // Chrysalis, Awakening Zone, etc. share a single sacrifice-for-{C}
         // mana ability, injected by subtype.
         let abilities = predefined_token_abilities("Spawn");
@@ -1949,6 +1957,121 @@ mod tests {
                 count: 1,
             })
         ));
+    }
+
+    #[test]
+    fn focused_writhing_chrysalis_spawn_token_sacrifice_adds_mana_and_triggers_counter() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Devoid (This card has no color.)\n\
+             When you cast this spell, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
+             Reach\n\
+             Whenever you sacrifice another Eldrazi, put a +1/+1 counter on this creature.",
+            "Writhing Chrysalis",
+            &["devoid".to_string(), "reach".to_string()],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string(), "Drone".to_string()],
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let chrysalis = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Writhing Chrysalis".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&chrysalis).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Eldrazi".to_string(), "Drone".to_string()],
+            };
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+            obj.trigger_definitions = parsed.triggers.clone().into();
+            Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers.clone());
+        }
+
+        // Focused runtime coverage: start from the parsed cast-trigger execute
+        // ability so this test isolates token resolution, injected token mana
+        // abilities, mana-ability cost payment, and sacrifice-trigger handling.
+        // Full casting would add unrelated hand/mana/priority setup.
+        let create_spawn = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Writhing Chrysalis cast trigger creates Spawn tokens");
+        let ability = build_resolved_from_def(create_spawn, chrysalis, PlayerId(0));
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Spawn token creation should resolve");
+
+        let spawn = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| {
+                let object = &state.objects[id];
+                object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Spawn")
+            })
+            .expect("Writhing Chrysalis should create an Eldrazi Spawn token");
+
+        assert!(
+            matches!(
+                *state.objects[&spawn].abilities[0].effect,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { .. },
+                    ..
+                }
+            ),
+            "Spawn token must have the runtime sacrifice-for-colorless mana ability"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: spawn,
+                ability_index: 0,
+            },
+        )
+        .expect("Spawn mana ability should activate");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1,
+            "Spawn sacrifice ability should add {{C}}"
+        );
+        assert!(!state.battlefield.contains(&spawn));
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == chrysalis),
+            "Writhing Chrysalis should see another Eldrazi sacrificed"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).expect("active player passes");
+        apply_as_current(&mut state, GameAction::PassPriority).expect("opponent passes");
+
+        assert_eq!(
+            state.objects[&chrysalis]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "Writhing Chrysalis sacrifice trigger should resolve to a +1/+1 counter"
+        );
     }
 
     #[test]
