@@ -5730,6 +5730,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             continue;
         }
         let lower = stripped.to_lowercase();
+        if is_commander_permission_sentence(&lower) {
+            continue;
+        }
 
         // Skip very short lines (single keywords, type lines)
         if lower.len() < 5 {
@@ -8592,6 +8595,12 @@ mod tests {
             count_effective_oracle_lines("Teferi, Temporal Archmage can be your commander."),
             0
         );
+
+        let mut face = make_face();
+        let oracle = "Teferi, Temporal Archmage can be your commander.";
+        face.oracle_text = Some(oracle.to_string());
+
+        assert!(audit_card_lines(oracle, &face).is_empty());
     }
 
     /// Regression: `AbilityCondition::IsYourTurn` is handled at runtime by
