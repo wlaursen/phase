@@ -1642,6 +1642,59 @@ mod tests {
     }
 
     #[test]
+    fn transient_retention_drives_player_retained_mana_query() {
+        // CR 611.2b + CR 703.4q: The Last Agni Kai shape — a spell installs a
+        // turn-scoped retention rule via `add_transient_continuous_effect` with
+        // `affected: SpecificPlayer { controller }` and modifications carrying
+        // `AddStaticMode { RetainUnspentMana }`. The runtime query must see it.
+        // RUNTIME test: drives `advance_phase` through the live pipeline.
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+        use crate::types::mana::{ManaColor, ManaType, ManaUnit};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Last Agni Kai".to_string(),
+            Zone::Graveyard,
+        );
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::RetainUnspentMana {
+                    color: Some(ManaColor::Red),
+                },
+            }],
+            None,
+        );
+
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(10),
+            false,
+            Vec::new(),
+        ));
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        advance_phase(&mut state, &mut Vec::new());
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+    }
+
+    #[test]
     fn static_player_scope_retention_covers_every_player() {
         // CR 703.4q: Upwelling — "Players don't lose unspent mana as steps and
         // phases end." With `affected: TargetFilter::Player`, retention must

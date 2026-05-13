@@ -2361,11 +2361,18 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 106.12: "don't lose [unspent] {color} mana as steps and phases end" —
-    // mana pool retention. Parsed as supported no-op (runtime behavior is future work).
-    if scan_contains_phrase(tp.lower, "lose") && scan_contains_phrase(tp.lower, "mana as steps") {
+    // CR 703.4q + CR 611.2b: "[subject] don't lose [unspent] {color} mana as
+    // steps and phases end" — installs a turn-scoped mana-pool retention rule
+    // (The Last Agni Kai class). When this clause appears as a spell effect,
+    // the duration is supplied by `with_clause_duration` from a leading
+    // "Until end of turn, " or trailing duration suffix; when it appears as a
+    // printed static, `oracle_static::try_parse_retain_unspent_mana_static`
+    // emits it on the source object directly.
+    if let Some(static_def) =
+        crate::parser::oracle_static::try_parse_retain_unspent_mana_static(tp.original, tp.lower)
+    {
         return parsed_clause(Effect::GenericEffect {
-            static_abilities: vec![],
+            static_abilities: vec![static_def],
             duration: None,
             target: None,
         });
@@ -29954,5 +29961,39 @@ mod snapshot_tests {
                 player: TargetFilter::Controller,
             }
         ));
+    }
+
+    /// CR 611.2b + CR 703.4q: "Until end of turn, you don't lose unspent red
+    /// mana as steps and phases end." (The Last Agni Kai) parses as a spell
+    /// effect that installs a turn-scoped `RetainUnspentMana` static via
+    /// `Effect::GenericEffect`. The static carries both a `mode` and an
+    /// `AddStaticMode` modification so `register_transient_effect` can
+    /// propagate the rule to the controller via `SpecificPlayer`.
+    #[test]
+    fn until_end_of_turn_retain_unspent_color_mana_installs_generic_effect() {
+        use crate::types::ability::Duration;
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Until end of turn, you don't lose unspent red mana as steps and phases end.",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            ref static_abilities,
+            duration,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].mode,
+            StaticMode::RetainUnspentMana {
+                color: Some(ManaColor::Red),
+            }
+        );
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::Controller));
     }
 }

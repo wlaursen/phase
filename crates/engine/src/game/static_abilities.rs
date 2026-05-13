@@ -580,16 +580,22 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
 
 /// CR 106.4 + CR 500.5 + CR 703.4q: Return active static mana-retention rules
 /// applying to `player_id` as step/phase-ending mana pools empty.
+///
+/// Scans both printed statics on battlefield permanents (Upwelling, Electro)
+/// and transient continuous effects pinned to the player via `SpecificPlayer`
+/// (spell-installed retention from The Last Agni Kai class).
 pub fn player_retained_mana_colors(
     state: &GameState,
     player_id: PlayerId,
 ) -> Vec<Option<ManaColor>> {
+    use crate::types::ability::ContinuousModification;
+
     let context = StaticCheckContext {
         player_id: Some(player_id),
         ..Default::default()
     };
 
-    battlefield_active_statics(state)
+    let mut colors: Vec<Option<ManaColor>> = battlefield_active_statics(state)
         .filter_map(|(source_obj, def)| {
             let StaticMode::RetainUnspentMana { color } = &def.mode else {
                 return None;
@@ -601,7 +607,39 @@ pub fn player_retained_mana_colors(
             }
             Some(*color)
         })
-        .collect()
+        .collect();
+
+    // CR 611.2b: Spell-installed retention lives in `transient_continuous_effects`
+    // with `affected: SpecificPlayer { id }` and an explicit `Duration`. Mirrors
+    // the `player_has_protection_from_everything` scan pattern.
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if let crate::types::ability::Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        for modification in &tce.modifications {
+            if let ContinuousModification::AddStaticMode {
+                mode: StaticMode::RetainUnspentMana { color },
+            } = modification
+            {
+                colors.push(*color);
+            }
+        }
+    }
+
+    colors
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static

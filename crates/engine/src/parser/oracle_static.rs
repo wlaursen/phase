@@ -70,7 +70,10 @@ fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
         })
 }
 
-fn try_parse_retain_unspent_mana_static(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_retain_unspent_mana_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
     nom_on_lower(text, lower, |input| {
         // CR 703.4q: Subject parameterizes the affected scope.
         // "You" → controller (Electro); "Players" → every player (Upwelling).
@@ -100,8 +103,17 @@ fn try_parse_retain_unspent_mana_static(text: &str, lower: &str) -> Option<Stati
         Ok((input, (affected, color)))
     })
     .map(|((affected, color), _)| {
+        // CR 611.2b: `modifications` carries the same mode so transient-effect
+        // installation (spells like The Last Agni Kai that emit this via
+        // `Effect::GenericEffect`) propagates the retention rule through
+        // `register_transient_effect` → `add_transient_continuous_effect`.
+        // Printed-static callers (Upwelling, Electro) reach this via the
+        // source's `static_definitions` scan and ignore `modifications`.
         StaticDefinition::new(StaticMode::RetainUnspentMana { color })
             .affected(affected)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::RetainUnspentMana { color },
+            }])
             .description(text.to_string())
     })
 }
