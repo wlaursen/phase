@@ -47,30 +47,40 @@ Implement the reviewed plan step by step.
 5. **CR annotations verified.** Run `grep -n "^{rule_number}" docs/MagicCompRules.txt` for every CR number before writing it into code. The `/validate-cr-annotations` skill and `mtg-rules-auditor` agent are the canonical tools for bulk verification and retroactive audits.
 6. **Architecture checkpoint.** If at any point something doesn't slot cleanly into existing patterns — **STOP**. Do not hack around it. Revise the approach to find the architecturally correct path, then continue. If the revision is non-trivial, message the planner for guidance.
 
-### Verification
+### Verification (Tilt-preferred, direct-cargo fallback)
 
-Run these commands after implementation and fix any failures:
+**Default to Tilt when it's running; fall back to direct cargo/pnpm only when Tilt is not up.** Tilt is the preferred path because it continuously rebuilds and avoids target-lock contention, but it is not always running (fresh clones, CI shells, headless invocations). Detect once per verification block with `tilt get uiresource clippy >/dev/null 2>&1` and pick the correct branch — see `CLAUDE.md` § "Canonical verification pattern" for the authoritative template.
+
+Always run formatting directly (Tilt doesn't auto-format), then verify:
 
 ```bash
 cargo fmt --all
-cargo clippy-strict
-cargo test -p engine
+
+# Engine + parser work (engine src changes invalidate card-data per Tiltfile,
+# so wait on card-data unconditionally):
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
+else
+  cargo clippy --all-targets -- -D warnings
+  cargo test -p engine
+  ./scripts/gen-card-data.sh
+fi
+
+# Frontend work:
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 180 check-frontend
+else
+  (cd client && pnpm run type-check && pnpm lint)
+fi
 ```
 
-If parser changes were made, also run:
+After a `tilt-wait.sh` non-zero exit, fetch detail with `tilt logs <resource> --tail 50 --since 2m`. After a direct cargo/pnpm failure, the diagnostics are already on stdout. Fix and re-verify.
+
+For parser work, also run the one-shot audit binaries — these are not continuous Tilt resources, so invoke directly in both modes:
 
 ```bash
-./scripts/gen-card-data.sh
-cargo coverage
-cargo semantic-audit
-```
-
-`cargo coverage` reports newly-supported cards and `Unimplemented` gaps. `cargo semantic-audit` catches misparses (wrong-but-parsed structures) that coverage cannot see — always run both after parser changes.
-
-If frontend changes were made (anything under `client/`), also run:
-
-```bash
-cd client && pnpm type-check && pnpm lint
+cargo coverage          # newly-supported cards + Unimplemented gaps
+cargo semantic-audit    # misparses coverage cannot see
 ```
 
 TypeScript errors and lint failures must not be committed.
