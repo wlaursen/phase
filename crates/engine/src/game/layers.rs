@@ -3431,6 +3431,50 @@ mod tests {
         assert_eq!(state.objects.get(&bear).unwrap().power, Some(4));
     }
 
+    #[test]
+    fn attached_object_presence_condition_uses_source_attachment_context() {
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Host Creature", 2, 2, PlayerId(0));
+        let artifact = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attached Condition Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+
+        let condition = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            )),
+        };
+        assert!(evaluate_condition(&state, &condition, PlayerId(0), aura));
+
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(artifact.into());
+        assert!(!evaluate_condition(&state, &condition, PlayerId(0), aura));
+    }
+
     /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count
     /// mana symbols in each affected creature's own mana cost. Hybrid and
     /// Phyrexian symbols that contain the color count through

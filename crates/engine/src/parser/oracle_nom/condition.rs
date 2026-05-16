@@ -86,6 +86,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // wins over the fixed-N "its power is N or greater" combinator inside
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
+        parse_attached_object_is_filter_condition,
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
@@ -97,6 +98,13 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_compound_control_presence,
         parse_filter_have_total_property,
         parse_control_conditions,
+        parse_remaining_state_presence_conditions,
+    ))
+    .parse(input)
+}
+
+fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         parse_opponent_poison_conditions,
         parse_defending_player_comparison_conditions,
         parse_no_opponent_comparison_conditions,
@@ -477,6 +485,198 @@ fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondi
     let (rest, count) = parse_number(rest)?;
     let (rest, _) = tag(" or more poison counters").parse(rest)?;
     Ok((rest, StaticCondition::OpponentPoisonAtLeast { count }))
+}
+
+#[derive(Clone)]
+struct AttachedConditionSubject {
+    type_filter: TypeFilter,
+    attachment_prop: FilterProp,
+}
+
+fn parse_attached_condition_subject(input: &str) -> OracleResult<'_, AttachedConditionSubject> {
+    alt((
+        value(
+            AttachedConditionSubject {
+                type_filter: TypeFilter::Permanent,
+                attachment_prop: FilterProp::EnchantedBy,
+            },
+            tag("enchanted permanent "),
+        ),
+        value(
+            AttachedConditionSubject {
+                type_filter: TypeFilter::Creature,
+                attachment_prop: FilterProp::EnchantedBy,
+            },
+            tag("enchanted creature "),
+        ),
+        value(
+            AttachedConditionSubject {
+                type_filter: TypeFilter::Artifact,
+                attachment_prop: FilterProp::EnchantedBy,
+            },
+            tag("enchanted artifact "),
+        ),
+        value(
+            AttachedConditionSubject {
+                type_filter: TypeFilter::Land,
+                attachment_prop: FilterProp::EnchantedBy,
+            },
+            tag("enchanted land "),
+        ),
+        value(
+            AttachedConditionSubject {
+                type_filter: TypeFilter::Creature,
+                attachment_prop: FilterProp::EquippedBy,
+            },
+            tag("equipped creature "),
+        ),
+    ))
+    .parse(input)
+}
+
+fn attached_subject_typed_filter(subject: &AttachedConditionSubject) -> TypedFilter {
+    TypedFilter::new(subject.type_filter.clone()).properties(vec![subject.attachment_prop.clone()])
+}
+
+fn merge_attached_predicate_filter(
+    subject: &AttachedConditionSubject,
+    predicate: TargetFilter,
+) -> Option<TargetFilter> {
+    let TargetFilter::Typed(predicate) = predicate else {
+        return None;
+    };
+
+    let mut filter = attached_subject_typed_filter(subject);
+    for type_filter in predicate.type_filters {
+        if !filter.type_filters.contains(&type_filter) {
+            filter.type_filters.push(type_filter);
+        }
+    }
+    filter.controller = predicate.controller;
+    for property in predicate.properties {
+        if !filter.properties.contains(&property) {
+            filter.properties.push(property);
+        }
+    }
+    Some(TargetFilter::Typed(filter))
+}
+
+fn parse_attached_predicate_single<'a>(
+    input: &'a str,
+    subject: &AttachedConditionSubject,
+) -> OracleResult<'a, TargetFilter> {
+    let (rest, _) = opt(parse_article).parse(input)?;
+    if let Ok((rest, color)) = parse_color(rest) {
+        return Ok((
+            rest,
+            TargetFilter::Typed(attached_subject_typed_filter(subject).properties(vec![
+                subject.attachment_prop.clone(),
+                FilterProp::HasColor { color },
+            ])),
+        ));
+    }
+
+    if let Ok((rest, property)) = alt((
+        value(
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Legendary,
+            },
+            tag::<_, _, OracleError<'_>>("legendary"),
+        ),
+        value(
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Basic,
+            },
+            tag::<_, _, OracleError<'_>>("basic"),
+        ),
+    ))
+    .parse(rest)
+    {
+        if rest.is_empty() {
+            let mut filter = attached_subject_typed_filter(subject);
+            filter.properties.push(property);
+            return Ok((rest, TargetFilter::Typed(filter)));
+        }
+    }
+
+    let (filter, remainder) = parse_type_phrase(rest);
+    if remainder.len() == rest.len() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let Some(filter) = merge_attached_predicate_filter(subject, filter) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((remainder, filter))
+}
+
+fn parse_attached_predicate_filter<'a>(
+    input: &'a str,
+    subject: &AttachedConditionSubject,
+) -> OracleResult<'a, TargetFilter> {
+    if let Ok((rest, left_text)) = take_until::<_, _, OracleError<'_>>(" or ").parse(input) {
+        let (right_text, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest)?;
+        let (left_rest, first) = parse_attached_predicate_single(left_text, subject)?;
+        if left_rest.is_empty() {
+            let (rest, second) = parse_attached_predicate_single(right_text, subject)?;
+            return Ok((
+                rest,
+                TargetFilter::Or {
+                    filters: vec![first, second],
+                },
+            ));
+        }
+    }
+
+    let (rest, first) = parse_attached_predicate_single(input, subject)?;
+    Ok((rest, first))
+}
+
+fn attached_filter_condition(filter: TargetFilter) -> StaticCondition {
+    match filter {
+        TargetFilter::Or { filters } => StaticCondition::Or {
+            conditions: filters
+                .into_iter()
+                .map(|filter| StaticCondition::IsPresent {
+                    filter: Some(filter),
+                })
+                .collect(),
+        },
+        filter => StaticCondition::IsPresent {
+            filter: Some(filter),
+        },
+    }
+}
+
+fn parse_attached_object_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, subject) = parse_attached_condition_subject(input)?;
+    let (rest, negated) = alt((
+        value(true, alt((tag("isn't "), tag("is not ")))),
+        value(false, tag("is ")),
+    ))
+    .parse(rest)?;
+    let (rest, filter) = parse_attached_predicate_filter(rest, &subject)?;
+    let condition = attached_filter_condition(filter);
+    let condition = if negated {
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::Typed(attached_subject_typed_filter(&subject))),
+                },
+                StaticCondition::Not {
+                    condition: Box::new(condition),
+                },
+            ],
+        }
+    } else {
+        condition
+    };
+    Ok((rest, condition))
 }
 
 /// Shared subject dispatcher for source-referential predicates.
@@ -4299,7 +4499,8 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 mod tests {
     use super::*;
     use crate::types::ability::{CardTypeSetSource, RoundingMode, TypeFilter, TypedFilter};
-    use crate::types::mana::ManaCost;
+    use crate::types::card_type::Supertype;
+    use crate::types::mana::{ManaColor, ManaCost};
 
     #[test]
     fn test_parse_condition_your_turn() {
@@ -5704,6 +5905,150 @@ mod tests {
             StaticCondition::Not { condition }
                 if matches!(*condition, StaticCondition::SourceMatchesFilter { .. })
         ));
+    }
+
+    fn typed_presence(condition: &StaticCondition) -> &TypedFilter {
+        match condition {
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } => tf,
+            other => panic!("expected typed IsPresent, got {other:?}"),
+        }
+    }
+
+    fn typed_presence_under_not(condition: &StaticCondition) -> &TypedFilter {
+        match condition {
+            StaticCondition::Not { condition } => typed_presence(condition),
+            StaticCondition::And { conditions } if conditions.len() == 2 => {
+                typed_presence_under_not(&conditions[1])
+            }
+            other => panic!("expected Not(IsPresent), got {other:?}"),
+        }
+    }
+
+    fn assert_negated_attached_subject_exists(condition: &StaticCondition) {
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected And condition");
+        };
+        assert_eq!(conditions.len(), 2);
+        let subject = typed_presence(&conditions[0]);
+        assert!(
+            subject.properties.contains(&FilterProp::EnchantedBy),
+            "expected source-relative attached subject in {subject:?}"
+        );
+    }
+
+    fn assert_has_color(tf: &TypedFilter, color: ManaColor) {
+        assert!(
+            tf.properties.iter().any(
+                |prop| matches!(prop, FilterProp::HasColor { color: actual } if *actual == color)
+            ),
+            "expected {color:?} in {tf:?}"
+        );
+    }
+
+    fn assert_attached_typed(
+        tf: &TypedFilter,
+        attachment_prop: FilterProp,
+        type_filter: TypeFilter,
+    ) {
+        assert!(
+            tf.properties.contains(&attachment_prop),
+            "expected {attachment_prop:?} in {tf:?}"
+        );
+        assert!(
+            tf.type_filters.contains(&type_filter),
+            "expected {type_filter:?} in {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_attached_object_is_type_condition() {
+        let (rest, c) = parse_inner_condition("enchanted permanent is a creature").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_attached_typed(tf, FilterProp::EnchantedBy, TypeFilter::Permanent);
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn test_attached_object_is_color_condition() {
+        let (rest, c) = parse_inner_condition("enchanted creature is red").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_attached_typed(tf, FilterProp::EnchantedBy, TypeFilter::Creature);
+        assert_has_color(tf, ManaColor::Red);
+    }
+
+    #[test]
+    fn test_attached_object_is_not_type_condition() {
+        let (rest, c) = parse_inner_condition("enchanted artifact isn't a creature").unwrap();
+        assert_eq!(rest, "");
+        assert_negated_attached_subject_exists(&c);
+        let tf = typed_presence_under_not(&c);
+        assert_attached_typed(tf, FilterProp::EnchantedBy, TypeFilter::Artifact);
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn test_attached_land_is_basic_mountain_condition() {
+        let (rest, c) = parse_inner_condition("enchanted land is a basic Mountain").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_attached_typed(tf, FilterProp::EnchantedBy, TypeFilter::Land);
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Mountain".to_string())));
+        assert!(tf.properties.iter().any(
+            |prop| matches!(prop, FilterProp::HasSupertype { value } if *value == Supertype::Basic)
+        ));
+    }
+
+    #[test]
+    fn test_attached_creature_is_not_legendary_condition() {
+        let (rest, c) = parse_inner_condition("enchanted creature isn't legendary").unwrap();
+        assert_eq!(rest, "");
+        assert_negated_attached_subject_exists(&c);
+        let tf = typed_presence_under_not(&c);
+        assert_attached_typed(tf, FilterProp::EnchantedBy, TypeFilter::Creature);
+        assert!(tf.properties.iter().any(
+            |prop| matches!(prop, FilterProp::HasSupertype { value } if *value == Supertype::Legendary)
+        ));
+    }
+
+    #[test]
+    fn test_attached_object_color_disjunction_condition() {
+        let (rest, c) = parse_inner_condition("enchanted permanent is red or green").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::Or { conditions } = c else {
+            panic!("expected Or condition");
+        };
+        assert_eq!(conditions.len(), 2);
+        let first = typed_presence(&conditions[0]);
+        assert_attached_typed(first, FilterProp::EnchantedBy, TypeFilter::Permanent);
+        assert_has_color(first, ManaColor::Red);
+        let second = typed_presence(&conditions[1]);
+        assert_attached_typed(second, FilterProp::EnchantedBy, TypeFilter::Permanent);
+        assert_has_color(second, ManaColor::Green);
+    }
+
+    #[test]
+    fn test_equipped_creature_type_disjunction_condition() {
+        let (rest, c) = parse_inner_condition("equipped creature is a Human or an Angel").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::Or { conditions } = c else {
+            panic!("expected Or condition");
+        };
+        let human = typed_presence(&conditions[0]);
+        assert_attached_typed(human, FilterProp::EquippedBy, TypeFilter::Creature);
+        assert!(human
+            .type_filters
+            .contains(&TypeFilter::Subtype("Human".to_string())));
+        let angel = typed_presence(&conditions[1]);
+        assert_attached_typed(angel, FilterProp::EquippedBy, TypeFilter::Creature);
+        assert!(angel
+            .type_filters
+            .contains(&TypeFilter::Subtype("Angel".to_string())));
     }
 
     // -- Player-state conditions --

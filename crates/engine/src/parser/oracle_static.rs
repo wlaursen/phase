@@ -13683,6 +13683,31 @@ mod tests {
     }
 
     #[test]
+    fn static_as_long_as_enchanted_permanent_is_creature_sets_attached_condition() {
+        let def = parse_static_line(
+            "As long as enchanted permanent is a creature, enchanted creature gets +1/+1.",
+        )
+        .expect("should parse attached-object condition");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        match def.condition {
+            Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            }) => {
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected attached-object IsPresent condition, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn static_as_long_as_equipped_creature_is_legendary_grants_to_equipped_creature() {
         let def = parse_static_line("As long as equipped creature is legendary, it has hexproof.")
             .expect("should parse attached-subject inverted grant");
