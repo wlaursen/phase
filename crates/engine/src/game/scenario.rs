@@ -863,6 +863,18 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Add the Legendary supertype (CR 205.4a: a card's supertypes are printed
+    /// on the type line; CR 205.4d: a permanent with the legendary supertype is
+    /// subject to the "legend rule" state-based action).
+    pub fn as_legendary(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.supertypes.contains(&Supertype::Legendary) {
+            obj.card_types.supertypes.push(Supertype::Legendary);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     // --- Special modifiers ---
 
     /// Mark this creature as having summoning sickness (entered this turn).

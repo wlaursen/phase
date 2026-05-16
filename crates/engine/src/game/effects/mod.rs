@@ -1869,6 +1869,87 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
+    // CR 603.3d + CR 601.2c: Multi-target-over-`Player` resolution fan-out.
+    // An "any number of target players each <verb>" trigger/spell announces a
+    // variable number of player targets when it goes on the stack (CR 601.2c,
+    // reached for triggers via CR 603.3d). The chosen player set lands in
+    // `ability.targets` as `TargetRef::Player` entries with `multi_target` set.
+    // Single-player-recipient effect handlers (`Discard`, `Mill`, `LoseLife`)
+    // resolve for only the FIRST `TargetRef::Player`, so without this branch a
+    // selection of two players discards only one. This fan-out is the missing
+    // iteration layer — a structural mirror of the `player_scope` loop above —
+    // recursing once per chosen player with `targets` narrowed to that one
+    // player and `multi_target` cleared.
+    if ability.multi_target.is_some()
+        && effect_target_filter(&ability.effect) == Some(&TargetFilter::Player)
+    {
+        let chosen_players: Vec<PlayerId> = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .collect();
+        if chosen_players.len() != 1 {
+            // CR 601.2c: "any number of target players" permits zero targets.
+            // CR 608.2c: An ability resolving with zero chosen player targets
+            // does nothing — emit `EffectResolved` and stop BEFORE
+            // `resolve_effect`, whose `resolve_player_for_context_ref`
+            // controller fallback would otherwise wrongly resolve for the
+            // ability's controller. Exactly one chosen player falls through to
+            // the unchanged single-recipient fast path; only zero or >=2 are
+            // handled here.
+            if chosen_players.is_empty() {
+                events.push(GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                });
+                return Ok(());
+            }
+            // CR 101.4 + CR 608.2c: Resolve the effect once per chosen player in
+            // APNAP order — each player's `<verb>` (and its `sub_ability`, e.g.
+            // Tinybones' `Mill` + `LoseLife`) is one instruction applied to
+            // multiple subjects, followed in turn order.
+            let fanout_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
+                .into_iter()
+                .filter(|pid| chosen_players.contains(pid))
+                .collect();
+            let initial_waiting_for = state.waiting_for.clone();
+            for (i, pid) in fanout_players.iter().enumerate() {
+                let mut narrowed = ability.clone();
+                narrowed.targets = vec![TargetRef::Player(*pid)];
+                narrowed.multi_target = None;
+                resolve_ability_chain(state, &narrowed, events, depth + 1)?;
+
+                // CR 608.2c: If an inner effect paused on a player choice (e.g.
+                // `WaitingFor::DiscardChoice` when a targeted player must pick
+                // which card to discard), stash the remaining players as a
+                // continuation chain and break — they resume via
+                // `drain_pending_continuation` after the choice resolves.
+                if state.waiting_for != initial_waiting_for {
+                    let remaining = &fanout_players[i + 1..];
+                    let mut tail: Option<Box<ResolvedAbility>> = None;
+                    for &remaining_pid in remaining.iter().rev() {
+                        let mut remaining_narrowed = ability.clone();
+                        remaining_narrowed.targets = vec![TargetRef::Player(remaining_pid)];
+                        remaining_narrowed.multi_target = None;
+                        if let Some(prev) = tail {
+                            super::ability_utils::append_to_sub_chain(
+                                &mut remaining_narrowed,
+                                *prev,
+                            );
+                        }
+                        tail = Some(Box::new(remaining_narrowed));
+                    }
+                    append_to_pending_continuation(state, tail);
+                    break;
+                }
+            }
+            return Ok(());
+        }
+    }
+
     // CR 608.2c: Evaluate top-level condition before emitting any optional or unless-pay
     // choice. This must run after player_scope binding so scoped abilities test
     // conditions relative to the scoped player.
