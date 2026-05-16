@@ -95,7 +95,7 @@ pub fn check_swallowed_clauses(
     detect_replacement_instead(&cleaned, oracle_text, parsed, diagnostics);
     detect_activate_only_during(&cleaned, oracle_text, parsed, diagnostics);
     detect_activate_limit(&cleaned, oracle_text, parsed, diagnostics);
-    detect_duration_until_eot(&cleaned, oracle_text, parsed, diagnostics);
+    detect_duration_until_eot(&cleaned, oracle_text, parsed, &ast_json, diagnostics);
     detect_optional_you_may(&cleaned, oracle_text, parsed, diagnostics);
     detect_dynamic_qty(&cleaned, oracle_text, &ast_json, diagnostics);
     detect_condition_if(&cleaned, oracle_text, &ast_json, parsed, diagnostics);
@@ -226,6 +226,7 @@ fn detect_duration_until_eot(
     cleaned: &str,
     original: &str,
     parsed: &ParsedAbilities,
+    ast_json: &str,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     // allow-noncombinator: swallow detector marker scan on classified text
@@ -233,6 +234,21 @@ fn detect_duration_until_eot(
         return;
     }
     if any_ability_has_duration(parsed) {
+        return;
+    }
+    // CR 611.2a: an "until end of turn"/"until end of combat" duration nested
+    // inside a token-granted ability (Effect::Token.static_abilities ->
+    // GrantTrigger -> trigger.execute) is invisible to the structured
+    // `def_tree_has_duration` walk, which does not descend into Effect::Token.
+    // The serialized AST is complete, so a marker check catches the nested case.
+    // Mirrors detect_duration_this_turn / detect_duration_next_turn.
+    if json_has_any(
+        ast_json,
+        &[
+            "\"duration\":\"UntilEndOfTurn\"",
+            "\"duration\":\"UntilEndOfCombat\"",
+        ],
+    ) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
@@ -1542,6 +1558,26 @@ fn detect_duration_this_turn(
     if total_this_turn > 0 && total_this_turn == case_solve_this_turn {
         return;
     }
+    // CR 603.4 / CR 307.5: "Activate only if ... this turn" routes the clause
+    // to an `ActivationRestriction::RequiresCondition`; "this turn" there
+    // scopes the activation condition, never an effect duration. Exempt ONLY
+    // when EVERY "this turn" occurrence lives on an "activate only" line
+    // (occurrence-balanced line scoping, mirroring the `case_solve_this_turn`
+    // block above) AND the AST confirms a `RequiresCondition` node. Line
+    // scoping is required so a card whose OTHER lines genuinely drop a
+    // duration is NOT exempted.
+    let activate_only_this_turn: usize = cleaned
+        .lines()
+        // allow-noncombinator: swallow detector marker scan on classified text
+        .filter(|line| line.contains("activate only"))
+        .map(|line| line.matches(" this turn").count())
+        .sum();
+    if total_this_turn > 0
+        && total_this_turn == activate_only_this_turn
+        && json_has_any(ast_json, &["RequiresCondition"])
+    {
+        return;
+    }
     // CR 700.4 + CR 700.5 (turn-history quantities and counters):
     // "this turn" is used pervasively as a SUFFIX on count/quantity
     // references rather than as a duration on an effect. The detector
@@ -1665,6 +1701,17 @@ fn detect_duration_this_turn(
         "CardsDrawnThisTurn",
         "PlayerActionsThisTurn",
         "OpponentLostLife",
+        // CR 611.3: a condition slot serialized as the typed `Unrecognized`
+        // marker means the parser routed the "as long as ... this turn" clause
+        // INTO a condition slot (and explicitly recorded that it could not
+        // parse it). "this turn" there is unambiguously consumed by a
+        // condition, not an effect duration. This is a specific node proving a
+        // *condition slot was populated* — same precision class as the
+        // `CreatureDiedThisTurn` / `AttackedThisTurn` markers — so it is not
+        // subject to the container over-breadth concern. The card itself
+        // remains visibly unsupported (`Unrecognized` is an explicit failure
+        // node + coverage `supported=false`), so no gap is hidden.
+        "\"condition\":{\"type\":\"Unrecognized\"",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -2098,6 +2145,83 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 611.2a: an "until end of turn" duration nested inside a token-granted
+    /// trigger (`Effect::Token` → `GrantTrigger` → `trigger.execute`) is
+    /// captured in the AST — `detect_duration_until_eot`'s structured walk
+    /// cannot see it, so the serialized-AST marker check exempts it.
+    #[test]
+    fn duration_until_eot_accepts_token_granted_trigger() {
+        let parsed = parse_named(
+            "Create a 2/2 green Bird creature token with \"Whenever a land you \
+             control enters, this token gets +1/+0 until end of turn.\"",
+            "Token Maker",
+            &["Sorcery"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
+
+    /// CR 603.4: "Activate only if ... this turn" scopes a turn-history
+    /// activation condition (`ActivationRestriction::RequiresCondition`), not
+    /// an effect duration — `detect_duration_this_turn` must not fire.
+    #[test]
+    fn duration_this_turn_accepts_activation_restriction_condition() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only if you attacked with two or more creatures this turn.",
+            "Test Keep",
+            &["Land"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// CR 611.3: an "as long as ... this turn" clause routed into an
+    /// `Unrecognized` condition slot means "this turn" was consumed by a
+    /// condition, not dropped as an effect duration (War Historian shape).
+    #[test]
+    fn duration_this_turn_accepts_unrecognized_as_long_as_condition() {
+        let parsed = parse_named(
+            "Reach\nThis creature has indestructible as long as it attacked a battle this turn.",
+            "War Historian",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// Regression guard #1: a "this turn" clause OUTSIDE Step 2's exemption
+    /// scope — no "activate only" line, no `Unrecognized` condition slot —
+    /// must STILL fire `Duration_ThisTurn`. Bloodcrazed Goblin's turn-history
+    /// `unless` clause is a genuine (non-duration) swallow that Step 2 must
+    /// leave untouched, proving the exemptions did not blanket-suppress.
+    #[test]
+    fn duration_this_turn_still_fires_outside_exemption_scope() {
+        let parsed = parse_named(
+            "This creature can't attack unless an opponent has been dealt damage this turn.",
+            "Bloodcrazed Goblin",
+            &["Creature"],
+        );
+
+        assert!(has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// Regression guard #2 (C2 over-suppression case): a card carrying BOTH a
+    /// `RequiresCondition` activation-restriction line AND a genuine dropped-
+    /// duration effect on a SEPARATE line must STILL fire `Duration_ThisTurn`
+    /// — the line-scoped count (`total_this_turn != activate_only_this_turn`)
+    /// keeps the exemption from over-reaching.
+    #[test]
+    fn duration_this_turn_fires_when_duration_and_activation_restriction_coexist() {
+        let parsed = parse_named(
+            "Creatures you control can't block this turn.\n\
+             {T}: Draw a card. Activate only if you attacked with two or more creatures this turn.",
+            "Test Hybrid",
+            &["Land"],
+        );
+
+        assert!(has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
     #[test]
