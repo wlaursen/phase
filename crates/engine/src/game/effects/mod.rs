@@ -6,8 +6,8 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
     EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetRef,
+    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -612,10 +612,15 @@ pub(super) fn resolve_optional_effect_decision(
         }
         AutoMayChoice::Decline => {
             let decline_branch = ability.else_ability.as_ref().or_else(|| {
-                ability
-                    .sub_ability
-                    .as_ref()
-                    .filter(|sub| should_resolve_subability_on_optional_decline(sub))
+                ability.sub_ability.as_ref().filter(|sub| {
+                    // CR 608.2c: A separate-sentence sibling ("You may shuffle."
+                    // "Draw a card.") is the next printed instruction — it
+                    // resolves regardless of the optional decision. A
+                    // within-clause continuation only resolves if it is a
+                    // conditioned decline branch (IfYouDo / Otherwise / composite).
+                    sub.sub_link == SubAbilityLink::SequentialSibling
+                        || should_resolve_subability_on_optional_decline(sub)
+                })
             });
             if let Some(branch) = decline_branch {
                 let mut resolved = branch.as_ref().clone();

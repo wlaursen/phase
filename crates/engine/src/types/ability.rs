@@ -7467,6 +7467,41 @@ pub struct AbilityDefinition {
     /// practice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_until: Option<RepeatContinuation>,
+    /// CR 608.2c: How this ability links to its parent when present as a
+    /// `sub_ability`. `ContinuationStep` (default) = part of the parent's action;
+    /// `SequentialSibling` = independent following instruction. Set during
+    /// `lower_effect_chain_ir` from the `ClauseBoundary` PRECEDING this clause.
+    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
+    pub sub_link: SubAbilityLink,
+}
+
+/// CR 608.2c: How a `sub_ability` relates to its parent in the resolution chain.
+/// Determines whether the sub is part of the parent's action (skipped when an
+/// optional parent is declined) or an independent following instruction (always
+/// resolves). Derived at parse time from the `ClauseBoundary` separating the
+/// two clauses in the printed Oracle text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SubAbilityLink {
+    /// Within-sentence continuation (comma / "then" joined). The sub is a
+    /// resolution step of the parent's instruction — Squadron Hawk
+    /// "...put them into your hand, then shuffle." Skipped when an optional
+    /// parent is declined. This is the default: an unmarked sub is a
+    /// continuation, preserving today's runtime behavior for every existing
+    /// chain.
+    #[default]
+    ContinuationStep,
+    /// Separate-sentence sibling instruction (sentence boundary). The sub is
+    /// the NEXT printed instruction, independent of the parent — Ponder
+    /// "You may shuffle." "Draw a card." Always resolves, even when an
+    /// optional parent is declined (CR 608.2c "in the order written").
+    SequentialSibling,
+}
+
+impl SubAbilityLink {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_continuation(link: &Self) -> bool {
+        matches!(link, Self::ContinuationStep)
+    }
 }
 
 /// CR 608.2c + CR 107.1c: how a "repeat this process" loop decides whether to
@@ -7543,6 +7578,7 @@ impl AbilityDefinition {
             player_scope: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             repeat_until: None,
+            sub_link: SubAbilityLink::ContinuationStep,
         }
     }
 
@@ -9735,6 +9771,11 @@ pub struct ResolvedAbility {
     /// predicate. Read by the `repeat_until` dispatch in `resolve_ability_chain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_until: Option<RepeatContinuation>,
+    /// CR 608.2c: How this ability links to its parent when present as a
+    /// `sub_ability`. Copied through from the originating `AbilityDefinition`.
+    /// `SequentialSibling` subs resolve even when an optional parent is declined.
+    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
+    pub sub_link: SubAbilityLink,
 }
 
 impl ResolvedAbility {
@@ -9779,6 +9820,7 @@ impl ResolvedAbility {
             target_selection_mode: TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            sub_link: SubAbilityLink::ContinuationStep,
         }
     }
 

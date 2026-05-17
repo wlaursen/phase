@@ -106,6 +106,7 @@ mod tests {
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         }
     }
 

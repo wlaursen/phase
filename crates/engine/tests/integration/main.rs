@@ -41,6 +41,7 @@ mod magnetic_mountain_choose_and_pay;
 mod master_of_ceremonies;
 mod mystic_forge_regression;
 mod oracle_parser;
+mod ponder_decline_shuffle_regression;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod roots_of_wisdom_if_you_cant_draw;

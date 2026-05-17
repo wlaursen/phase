@@ -71,6 +71,9 @@ pub fn build_resolved_from_def_with_targets(
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 608.2c: Carry the parent-link kind through so the decline classifier can
+    // distinguish a separate-sentence sibling from a within-clause continuation.
+    resolved.sub_link = def.sub_link;
     resolved
 }
 

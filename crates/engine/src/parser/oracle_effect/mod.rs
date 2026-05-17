@@ -49,9 +49,9 @@ use crate::types::ability::{
     GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
     PreventionScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetChoiceTiming,
-    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessPayModifier, UntilCondition,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -11311,6 +11311,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
 
     // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
     let mut defs: Vec<AbilityDefinition> = Vec::new();
+    // CR 608.2c: Boundary that followed the previous normal-path clause. Used to
+    // stamp each clause's `sub_link` — a `Sentence` boundary before this clause
+    // makes it a `SequentialSibling` (independent following instruction); a
+    // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
+    let mut prev_boundary: Option<ClauseBoundary> = None;
     for clause_ir in &ir.clauses {
         // Skip absorbed clauses — their followup continuation is applied below.
         if clause_ir.absorbed_by_followup {
@@ -11536,6 +11541,17 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // ── Build AbilityDefinition from ClauseIr ──
         let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        // CR 608.2c: This clause's link to its parent = the boundary that
+        // SEPARATED the previous clause from this one. A `Sentence` boundary
+        // marks a `SequentialSibling` (next printed instruction, resolves even
+        // when an optional parent is declined); `Comma`/`Then`/none marks a
+        // within-clause `ContinuationStep` (part of the parent's action).
+        def.sub_link = match prev_boundary {
+            Some(ClauseBoundary::Sentence) => SubAbilityLink::SequentialSibling,
+            Some(ClauseBoundary::Then) | Some(ClauseBoundary::Comma) | None => {
+                SubAbilityLink::ContinuationStep
+            }
+        };
         def.target_choice_timing = target_choice_timing_for_clause(clause_ir);
         // CR 115.1 + CR 701.9b: copy the per-clause selection mode captured by
         // `parse_target_with_ctx` during chunk parse. `Random` flips the engine
@@ -11703,6 +11719,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if let Some(ref continuation) = clause_ir.intrinsic_continuation {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
         }
+
+        // CR 608.2c: Advance the separating boundary for the next normal-path
+        // clause. Special-clause arms `continue` before this point — they are
+        // riders that modify prior defs, not new siblings, so they neither
+        // consume nor advance `prev_boundary`.
+        prev_boundary = clause_ir.boundary;
     }
 
     // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
