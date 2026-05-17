@@ -3224,28 +3224,37 @@ fn apply_single_replacement(
     Ok(proposed)
 }
 
-/// CR 616.1f: When two or more replacement effects apply to the same event, the
-/// affected object's controller normally chooses an ordering. That ordering is
-/// only *material* when applying one replacement could change whether another is
-/// still applicable; otherwise the prompt is degenerate (every order yields the
-/// same result, and all candidates always apply).
+/// CR 616.1: When two or more replacement and/or prevention effects apply to the
+/// same event, the affected object's controller chooses one to apply, then the
+/// process repeats (CR 616.1f) over the still-applicable effects. The engine
+/// surfaces that choice as a prompt.
 ///
-/// This predicate classifies a candidate set as material iff *either*:
-/// - *any* candidate's `execute` ability is an unconditionally order-sensitive
-///   shape — a destination-redirecting `Effect::ChangeZone` (CR 614.6 — Rest in
-///   Peace class; inspected via its own `destination`, not
-///   `is_event_modifier_effect`, which classifies *all* `ChangeZone` as a pure
-///   modifier and would miss exactly the material case), a controller override
-///   (CR 616.1b — "enters under your control"), or `Effect::BecomeCopy` /
-///   copy-as-it-enters (CR 616.1c — Essence of the Wild); *or*
-/// - two or more candidates *overwrite the same* `ProposedEvent` field — e.g. a
-///   tapland's `Effect::Tap` and Spelunking's `Effect::Untap` both write
-///   `enter_tapped`, so the last-applied wins and the order changes the result.
+/// This predicate is a sound *observational-equivalence optimization*: the CR
+/// has no "skip the prompt" provision, but when every candidate ordering yields
+/// an identical final outcome the prompt is degenerate and may be skipped
+/// without changing the result. The auto-resolve path still iterates per the
+/// CR 616.1f repeat semantics — it only suppresses a player choice that cannot
+/// affect anything.
 ///
-/// A single field-writer with no peer is immaterial. Unrecognized effect shapes
-/// default to MATERIAL — never auto-resolve a possibly order-sensitive set; this
-/// conservative default also covers self-replacement effects (CR 616.1a /
-/// CR 614.15).
+/// A candidate set is *material* (the prompt must be shown) iff *either*:
+/// - *any* candidate is an unconditionally order-sensitive shape — a
+///   destination-redirecting `Effect::ChangeZone` (CR 614.6 — Rest in Peace
+///   class; inspected via its own `destination`, not `is_event_modifier_effect`,
+///   which classifies *all* `ChangeZone` as a pure modifier and would miss
+///   exactly the material case), a controller override (CR 616.1b — "enters
+///   under your control"), `Effect::BecomeCopy` / copy-as-it-enters
+///   (CR 616.1c — Essence of the Wild), or a `null`-`execute` replacement
+///   carrying an event-modifying side field (count/mana modification); *or*
+/// - two or more candidates *modify the same* event field whose modifications do
+///   not commute — e.g. a tapland's `Effect::Tap` and Spelunking's
+///   `Effect::Untap` both write `enter_tapped` (last wins), or Doubling Season's
+///   `Double` and Hardened Scales' `Plus` both modify an `AddCounter` count
+///   (`Double` and `Plus` do not commute).
+///
+/// A single field-modifier with no peer is immaterial. Unrecognized effect
+/// shapes default to MATERIAL — never auto-resolve a possibly order-sensitive
+/// set; this conservative default also covers self-replacement effects
+/// (CR 616.1a / CR 614.15).
 fn replacement_ordering_is_material(
     state: &GameState,
     candidates: &[ReplacementId],
@@ -3255,13 +3264,16 @@ fn replacement_ordering_is_material(
         ProposedEvent::ZoneChange { to, .. } => Some(*to),
         _ => None,
     };
-    // CR 616.1f: classify each candidate. A set is material if either:
+    // CR 616.1: classify each candidate. A set is material if either:
     //  - any candidate is *unconditionally* material (zone redirect, controller
-    //    override, copy-as-it-enters — shapes that retroactively change another
-    //    candidate's applicability regardless of the other candidates), or
-    //  - two or more candidates write the *same* `ProposedEvent` field, so the
-    //    last-applied wins and the order changes the outcome (tapland + Spelunking
-    //    both write `enter_tapped`). A single writer of a field has no conflict.
+    //    override, copy-as-it-enters, count/mana side-field modifier — shapes
+    //    that change another candidate's applicability or whose ordering is
+    //    unconditionally observable), or
+    //  - two or more candidates modify the *same* event field with
+    //    non-commuting modifications, so the order changes the outcome (tapland
+    //    + Spelunking both write `enter_tapped`; Doubling Season + Hardened
+    //    Scales both modify an `AddCounter` count). A single modifier of a field
+    //    has no conflict.
     let mut seen_fields: Vec<EventField> = Vec::new();
     for rid in candidates {
         match candidate_materiality(state, *rid, proposed_to) {
@@ -3278,34 +3290,46 @@ fn replacement_ordering_is_material(
     false
 }
 
-/// A `ProposedEvent` field a non-redirecting replacement *overwrites*. Two
-/// candidates overwriting the same field conflict (order-material, CR 616.1f) —
-/// last-applied wins. Append-style fields (`enter_with_counters` accumulates)
-/// are not overwrite collisions and are intentionally not modeled here.
+/// An event field a non-redirecting replacement modifies. Two candidates
+/// modifying the same field conflict when their modifications do not commute
+/// (order-material, CR 616.1) — e.g. last-write-wins for `EnterTapped`, or
+/// `Double` vs `Plus` for `Count`. Append-style fields (`enter_with_counters`
+/// accumulates) are not collisions and are intentionally not modeled here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventField {
     /// `ZoneChange::enter_tapped` — overwritten by `Effect::Tap` / `Effect::Untap`.
     EnterTapped,
+    /// The count of a count-bearing event (`AddCounter`, `CreateToken`, `Draw`,
+    /// `Mill`, …) — modified by a `quantity_modification` side field
+    /// (`Double` / `Plus` / `Minus`, which do not pairwise commute).
+    Count,
+    /// The produced mana type/amount of a `ProduceMana` event — modified by a
+    /// `mana_modification` side field (`ReplaceWith` / `Multiply`).
+    ManaType,
 }
 
-/// CR 616.1f classification of a single replacement candidate.
+/// CR 616.1 classification of a single replacement candidate.
 enum CandidateMateriality {
     /// An order-sensitive shape regardless of the other candidates (zone
     /// redirect, controller override, copy-as-it-enters).
     Unconditional,
-    /// A pure `ProposedEvent`-field modifier. Immaterial alone; material iff
-    /// another candidate writes the same field.
+    /// A pure event-field modifier. Immaterial alone; material iff another
+    /// candidate modifies the same field with a non-commuting modification.
     Writes(EventField),
     /// Touches no event field that another candidate could also touch
-    /// (`Effect::Choose` post-effect, null/no-op pass-through).
+    /// (`Effect::Choose` post-effect, null/no-op pass-through with no side field).
     Disjoint,
 }
 
-/// CR 616.1f: classify a candidate's `execute` ability. Inspects the root
-/// `Effect` and walks `sub_ability` directly — `first_non_modifier_ability`
-/// skips over `ChangeZone` links, so it cannot surface the material redirect
-/// case. Unrecognized effect shapes default to `Unconditional` (conservative —
-/// never auto-resolve a possibly order-sensitive set).
+/// CR 616.1: classify a candidate. A `null`-`execute` replacement is *not* a
+/// guaranteed no-op — it can carry an event-modifying side field
+/// (`quantity_modification` / `mana_modification`) that mutates the event's
+/// count or mana type (Doubling Season, Hardened Scales, Contamination). When
+/// `execute` is present, inspects the root `Effect` and walks `sub_ability`
+/// directly — `first_non_modifier_ability` skips over `ChangeZone` links, so it
+/// cannot surface the material redirect case. Unrecognized effect shapes default
+/// to `Unconditional` (conservative — never auto-resolve a possibly
+/// order-sensitive set).
 fn candidate_materiality(
     state: &GameState,
     rid: ReplacementId,
@@ -3320,8 +3344,19 @@ fn candidate_materiality(
         return CandidateMateriality::Unconditional;
     };
     let Some(execute) = repl_def.execute.as_deref() else {
-        // Null/no-op replacement (test-fixture / pure pass-through shape) — it
-        // cannot affect any other candidate's applicability.
+        // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
+        // replacement (Doubling Season, Hardened Scales) modifies the count via
+        // `quantity_modification`; a `ProduceMana` replacement (Contamination,
+        // Mana Reflection) modifies the produced mana via `mana_modification`.
+        // Two such candidates on one event are order-material (`Double` and
+        // `Plus` do not commute). A `null` `execute` with neither side field is
+        // a genuine pass-through (test fixtures, structural placeholders).
+        if repl_def.quantity_modification.is_some() {
+            return CandidateMateriality::Writes(EventField::Count);
+        }
+        if repl_def.mana_modification.is_some() {
+            return CandidateMateriality::Writes(EventField::ManaType);
+        }
         return CandidateMateriality::Disjoint;
     };
     let mut field: Option<EventField> = None;
@@ -3355,7 +3390,7 @@ fn candidate_materiality(
             // order-independent so they do NOT fall through to the conservative
             // material default below.
             Effect::PutCounter { .. } | Effect::Choose { .. } => {}
-            // CR 616.1f: any unrecognized effect shape defaults to MATERIAL —
+            // CR 616.1: any unrecognized effect shape defaults to MATERIAL —
             // never auto-resolve a set whose order-sensitivity is unproven.
             _ => return CandidateMateriality::Unconditional,
         }
@@ -3445,11 +3480,12 @@ fn pipeline_loop(
             });
             return ReplacementResult::NeedsChoice(affected);
         } else {
-            // CR 616.1f: ordering is material only when applying one replacement
-            // can change another's applicability; otherwise the prompt is
-            // degenerate. Auto-resolve: apply candidates[0] and re-loop — the
-            // single-candidate mandatory path, iterated. All candidates still
-            // apply exactly once.
+            // CR 616.1: the choice is degenerate here — every candidate ordering
+            // yields an observationally identical outcome — so the prompt is
+            // skipped. Auto-resolve: apply candidates[0] and re-loop, which
+            // preserves the CR 616.1f repeat semantics (apply one, then repeat
+            // over the still-applicable effects). All candidates still apply
+            // exactly once.
             let rid = candidates[0];
             proposed.mark_applied(rid);
             match apply_single_replacement(
@@ -4008,6 +4044,107 @@ mod tests {
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
             panic!("expected NeedsChoice for material ordering, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+    }
+
+    #[test]
+    fn tap_untap_field_collision_prompts_for_order() {
+        // CR 616.1: two `Moved` replacements that both modify the `enter_tapped`
+        // field of a single `ZoneChange` event — one `Effect::Tap` (the
+        // tapland's own "enters tapped"), one `Effect::Untap` (a Spelunking-style
+        // "lands enter untapped"). The modifications do not commute (last wins),
+        // so the ordering is material and the prompt must be surfaced. Directly
+        // exercises the `Writes`-collision branch.
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield);
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield);
+        let mut state =
+            test_state_with_object(ObjectId(10), Zone::Hand, vec![tap_repl, untap_repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for enter_tapped field collision, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+    }
+
+    #[test]
+    fn quantity_modification_field_collision_prompts_for_order() {
+        // CR 616.1: Doubling Season (`Double`) and Hardened Scales (`Plus{1}`)
+        // both modify the count of a single `AddCounter` event via the
+        // `quantity_modification` side field — and these modifications do NOT
+        // commute: (1+1)*2 = 4 vs (1*2)+1 = 3. Both replacements have a `null`
+        // `execute`, so they would have classified `Disjoint` before the
+        // side-field fix. The set must be material and surface the prompt.
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+
+        let doubling_season = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+        let hardened_scales = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Plus { value: 1 });
+
+        let mut state = GameState::new_two_player(42);
+        let mut src1 = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        src1.replacement_definitions = vec![doubling_season].into();
+        let mut src2 = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        src2.replacement_definitions = vec![hardened_scales].into();
+        state.objects.insert(ObjectId(10), src1);
+        state.objects.insert(ObjectId(20), src2);
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
+
+        let target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(30), target);
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: ObjectId(30),
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for non-commuting count modification, got {result:?}");
         };
         assert_eq!(player, PlayerId(0));
     }
