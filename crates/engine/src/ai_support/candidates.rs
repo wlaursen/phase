@@ -46,6 +46,9 @@ pub struct CandidateAction {
     pub metadata: ActionMetadata,
 }
 
+const SELECTION_POOL_CAP: usize = 12;
+const SELECTION_CANDIDATE_CAP: usize = 64;
+
 fn collect_mana_combinations(
     count: usize,
     options: &[ManaType],
@@ -599,27 +602,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             let max_keep = (*keep_count).min(selectable_cards.len());
             if *up_to {
                 // Generate combinations for all valid sizes 0..=max_keep
-                (0..=max_keep)
-                    .flat_map(|size| combinations(selectable_cards, size))
-                    .map(|combo| {
-                        candidate(
-                            GameAction::SelectCards { cards: combo },
-                            TacticalClass::Selection,
-                            Some(*player),
-                        )
-                    })
-                    .collect()
+                bounded_select_card_candidates(*player, selectable_cards, 0..=max_keep)
             } else {
-                combinations(selectable_cards, max_keep)
-                    .into_iter()
-                    .map(|combo| {
-                        candidate(
-                            GameAction::SelectCards { cards: combo },
-                            TacticalClass::Selection,
-                            Some(*player),
-                        )
-                    })
-                    .collect()
+                bounded_select_card_candidates(*player, selectable_cards, [max_keep])
             }
         }
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
@@ -709,9 +694,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 vec![*count]
             };
             let mut seen = HashSet::new();
-            sizes
+            bounded_combinations_usize(&indices, sizes, SELECTION_POOL_CAP, SELECTION_CANDIDATE_CAP)
                 .into_iter()
-                .flat_map(|size| combinations_usize(&indices, size))
                 .filter(|sideboard_indices| seen.insert(sideboard_indices.clone()))
                 .map(|sideboard_indices| {
                     candidate(
@@ -736,24 +720,28 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             } else {
                 vec![*count]
             };
-            sizes
-                .into_iter()
-                .flat_map(|size| combinations(cards, size))
-                .filter(|combo| {
-                    crate::game::effects::choose_from_zone::selection_satisfies_constraint(
-                        state,
-                        combo,
-                        constraint.as_ref(),
-                    )
-                })
-                .map(|combo| {
-                    candidate(
-                        GameAction::SelectCards { cards: combo },
-                        TacticalClass::Selection,
-                        Some(*player),
-                    )
-                })
-                .collect()
+            bounded_combinations_for_sizes(
+                cards,
+                sizes,
+                SELECTION_POOL_CAP,
+                SELECTION_CANDIDATE_CAP,
+            )
+            .into_iter()
+            .filter(|combo| {
+                crate::game::effects::choose_from_zone::selection_satisfies_constraint(
+                    state,
+                    combo,
+                    constraint.as_ref(),
+                )
+            })
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect()
         }
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
@@ -774,29 +762,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             up_to,
             ..
         } => {
-            if *up_to {
-                (*min_count..=*count)
-                    .flat_map(|size| combinations(cards, size))
-                    .map(|combo| {
-                        candidate(
-                            GameAction::SelectCards { cards: combo },
-                            TacticalClass::Selection,
-                            Some(*player),
-                        )
-                    })
-                    .collect()
+            let sizes = if *up_to {
+                (*min_count..=*count).collect()
             } else {
-                combinations(cards, *count)
-                    .into_iter()
-                    .map(|combo| {
-                        candidate(
-                            GameAction::SelectCards { cards: combo },
-                            TacticalClass::Selection,
-                            Some(*player),
-                        )
-                    })
-                    .collect()
-            }
+                vec![*count]
+            };
+            bounded_select_card_candidates(*player, cards, sizes)
         }
         WaitingFor::DrawnThisTurnTopdeckChoice {
             player,
@@ -804,16 +775,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             count,
             min_count,
             ..
-        } => (*min_count..=*count)
-            .flat_map(|size| combinations(cards, size))
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, cards, *min_count..=*count),
         // CR 101.4: Generate all valid per-category permanent assignments.
         WaitingFor::CategoryChoice {
             player,
@@ -874,8 +836,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             options,
             choice_type,
-            ..
-        } => named_choice_actions(state, *player, options, choice_type),
+            source_id,
+        } => named_choice_actions(state, *player, options, choice_type, *source_id),
         WaitingFor::DamageSourceChoice {
             player, options, ..
         } => options
@@ -1029,16 +991,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             count,
             cards,
-        } => combinations(cards, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::DiscardChoice {
             player,
             count,
@@ -1049,29 +1002,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => {
             // CR 701.9b: When up_to, generate combinations for all valid sizes 0..=count.
-            let mut actions: Vec<_> = if *up_to {
-                (0..=*count)
-                    .flat_map(|size| combinations(cards, size))
-                    .map(|combo| {
-                        candidate(
-                            GameAction::SelectCards { cards: combo },
-                            TacticalClass::Selection,
-                            Some(*player),
-                        )
-                    })
-                    .collect()
+            let sizes = if *up_to {
+                (0..=*count).collect()
             } else {
-                combinations(cards, *count)
-                    .into_iter()
-                    .map(|combo| {
-                        candidate(
-                            GameAction::SelectCards { cards: combo },
-                            TacticalClass::Selection,
-                            Some(*player),
-                        )
-                    })
-                    .collect()
+                vec![*count]
             };
+            let mut actions = bounded_select_card_candidates(*player, cards, sizes);
             // CR 608.2c: "discard N unless you discard a [type]" — also generate
             // single-card selections for cards matching the unless filter.
             // Guard: skip when count == 1, since combinations already covers all singles.
@@ -1157,62 +1093,26 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             count,
             cards,
             ..
-        } => combinations(cards, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::DiscardForManaAbility {
             player,
             count,
             cards,
             ..
-        } => combinations(cards, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, cards, [*count]),
         // CR 118.3: AI selects permanents to sacrifice as cost
         WaitingFor::SacrificeForCost {
             player,
             count,
             permanents,
             ..
-        } => combinations(permanents, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, permanents, [*count]),
         WaitingFor::ReturnToHandForCost {
             player,
             count,
             permanents,
             ..
-        } => combinations(permanents, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, permanents, [*count]),
         // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
             player, creatures, ..
@@ -1231,32 +1131,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             count,
             choices,
             ..
-        } => combinations(choices, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, choices, [*count]),
         // CR 702.34a: AI selects creatures to tap as part of paying flashback tap cost.
         WaitingFor::TapCreaturesForSpellCost {
             player,
             count,
             creatures,
             ..
-        } => combinations(creatures, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, creatures, [*count]),
         // CR 118.9a + CR 601.2b + CR 601.2h: AI selects cards to exile as part
         // of paying an alternative or additional casting cost — escape
         // (CR 702.138a, graveyard) or pitch spells (hand).
@@ -1265,16 +1147,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             count,
             cards,
             ..
-        } => combinations(cards, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,
@@ -2867,16 +2740,7 @@ fn select_cards_variants(
     exact_count: Option<usize>,
 ) -> Vec<CandidateAction> {
     match exact_count {
-        Some(count) => combinations(cards, count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(player),
-                )
-            })
-            .collect(),
+        Some(count) => bounded_select_card_candidates(player, cards, [count]),
         None => {
             let mut actions = vec![candidate(
                 GameAction::SelectCards { cards: Vec::new() },
@@ -2902,6 +2766,23 @@ fn select_cards_variants(
             actions
         }
     }
+}
+
+fn bounded_select_card_candidates(
+    player: PlayerId,
+    cards: &[crate::types::identifiers::ObjectId],
+    sizes: impl IntoIterator<Item = usize>,
+) -> Vec<CandidateAction> {
+    bounded_combinations_for_sizes(cards, sizes, SELECTION_POOL_CAP, SELECTION_CANDIDATE_CAP)
+        .into_iter()
+        .map(|combo| {
+            candidate(
+                GameAction::SelectCards { cards: combo },
+                TacticalClass::Selection,
+                Some(player),
+            )
+        })
+        .collect()
 }
 
 fn mode_actions(
@@ -2967,14 +2848,11 @@ fn named_choice_actions(
     player: PlayerId,
     options: &[String],
     choice_type: &ChoiceType,
+    source_id: Option<ObjectId>,
 ) -> Vec<CandidateAction> {
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
-        let mut seen = HashSet::new();
-        return state
-            .all_card_names
-            .iter()
-            .filter(|name| seen.insert(name.to_ascii_lowercase()))
-            .cloned()
+        return card_name_choice_candidates(state, player, source_id)
+            .into_iter()
             .map(|choice| {
                 candidate(
                     GameAction::ChooseOption { choice },
@@ -2996,6 +2874,86 @@ fn named_choice_actions(
             )
         })
         .collect()
+}
+
+fn card_name_choice_candidates(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+) -> Vec<String> {
+    const MAX_CARD_NAME_CANDIDATES: usize = 24;
+
+    if state.all_card_names.is_empty() {
+        return Vec::new();
+    }
+
+    let legal_names: HashSet<String> = state
+        .all_card_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut choices = Vec::new();
+
+    fn push_name(
+        name: &str,
+        legal_names: &HashSet<String>,
+        seen: &mut HashSet<String>,
+        choices: &mut Vec<String>,
+    ) {
+        let key = name.to_ascii_lowercase();
+        if !legal_names.contains(&key) || !seen.insert(key) {
+            return;
+        }
+        choices.push(name.to_string());
+    }
+
+    if let Some(source_id) = source_id {
+        if let Some(source) = state.objects.get(&source_id) {
+            push_name(&source.name, &legal_names, &mut seen, &mut choices);
+        }
+    }
+
+    let mut push_object_name = |id: ObjectId| {
+        if choices.len() >= MAX_CARD_NAME_CANDIDATES {
+            return;
+        }
+        if let Some(obj) = state.objects.get(&id) {
+            push_name(&obj.name, &legal_names, &mut seen, &mut choices);
+        }
+    };
+
+    for &id in &state.battlefield {
+        push_object_name(id);
+    }
+    if let Some(controller) = state.players.iter().find(|p| p.id == player) {
+        for &id in controller.hand.iter() {
+            push_object_name(id);
+        }
+        for &id in controller.graveyard.iter() {
+            push_object_name(id);
+        }
+        for &id in controller.library.iter() {
+            push_object_name(id);
+        }
+    }
+    for &id in &state.exile {
+        push_object_name(id);
+    }
+
+    if choices.is_empty() {
+        let fallback = state
+            .all_card_names
+            .iter()
+            .find(|name| seen.insert(name.to_ascii_lowercase()))
+            .cloned();
+        if let Some(name) = fallback {
+            choices.push(name);
+        }
+    }
+
+    choices.truncate(MAX_CARD_NAME_CANDIDATES);
+    choices
 }
 
 /// CR 103.5b + Serum Powder Oracle text: collect every ObjectId in `player`'s
@@ -3328,6 +3286,47 @@ fn combinations(
     result
 }
 
+fn bounded_combinations_for_sizes(
+    items: &[crate::types::identifiers::ObjectId],
+    sizes: impl IntoIterator<Item = usize>,
+    pool_cap: usize,
+    output_cap: usize,
+) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
+    let mut seen = HashSet::new();
+    let mut output = Vec::new();
+
+    for size in sizes {
+        if output.len() >= output_cap || size > items.len() {
+            continue;
+        }
+        if size > pool_cap {
+            push_object_combo(&mut output, &mut seen, items.iter().take(size).copied());
+            continue;
+        }
+        let pool_len = items.len().min(pool_cap);
+        for combo in combinations(&items[..pool_len], size) {
+            push_object_combo(&mut output, &mut seen, combo);
+            if output.len() >= output_cap {
+                break;
+            }
+        }
+    }
+
+    output
+}
+
+fn push_object_combo(
+    output: &mut Vec<Vec<crate::types::identifiers::ObjectId>>,
+    seen: &mut HashSet<Vec<u64>>,
+    combo: impl IntoIterator<Item = crate::types::identifiers::ObjectId>,
+) {
+    let combo: Vec<_> = combo.into_iter().collect();
+    let key: Vec<u64> = combo.iter().map(|id| id.0).collect();
+    if seen.insert(key) {
+        output.push(combo);
+    }
+}
+
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
     if k == 0 {
         return vec![Vec::new()];
@@ -3348,6 +3347,46 @@ fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
     result
 }
 
+fn bounded_combinations_usize(
+    items: &[usize],
+    sizes: impl IntoIterator<Item = usize>,
+    pool_cap: usize,
+    output_cap: usize,
+) -> Vec<Vec<usize>> {
+    let mut seen = HashSet::new();
+    let mut output = Vec::new();
+
+    for size in sizes {
+        if output.len() >= output_cap || size > items.len() {
+            continue;
+        }
+        if size > pool_cap {
+            push_usize_combo(&mut output, &mut seen, items.iter().take(size).copied());
+            continue;
+        }
+        let pool_len = items.len().min(pool_cap);
+        for combo in combinations_usize(&items[..pool_len], size) {
+            push_usize_combo(&mut output, &mut seen, combo);
+            if output.len() >= output_cap {
+                break;
+            }
+        }
+    }
+
+    output
+}
+
+fn push_usize_combo(
+    output: &mut Vec<Vec<usize>>,
+    seen: &mut HashSet<Vec<usize>>,
+    combo: impl IntoIterator<Item = usize>,
+) {
+    let combo: Vec<_> = combo.into_iter().collect();
+    if seen.insert(combo.clone()) {
+        output.push(combo);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3356,10 +3395,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
-        ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect,
+        ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect, EffectKind,
         ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter, TargetRef,
     };
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
@@ -3589,29 +3628,110 @@ mod tests {
     }
 
     #[test]
-    fn named_card_choice_uses_global_card_names() {
+    fn named_card_choice_uses_bounded_in_game_names() {
         let mut state = GameState::new_two_player(42);
-        state.all_card_names = vec![
-            "Lightning Bolt".to_string(),
-            "Counterspell".to_string(),
-            "lightning bolt".to_string(),
-        ]
-        .into();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Petrified Hamlet".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let mut names = vec!["Petrified Hamlet".to_string(), "Forest".to_string()];
+        names.extend((0..10_000).map(|i| format!("Bulk Card {i}")));
+        state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
-            source_id: None,
+            source_id: Some(source),
         };
 
         let actions = candidate_actions(&state);
         assert_eq!(actions.len(), 2);
-        assert!(actions.iter().any(|candidate| {
-            matches!(
-                candidate.action,
-                GameAction::ChooseOption { ref choice } if choice == "Lightning Bolt"
-            )
-        }));
+        assert!(matches!(
+            actions[0].action,
+            GameAction::ChooseOption { ref choice } if choice == "Petrified Hamlet"
+        ));
+        assert!(matches!(
+            actions[1].action,
+            GameAction::ChooseOption { ref choice } if choice == "Forest"
+        ));
+    }
+
+    #[test]
+    fn effect_zone_choice_up_to_large_pool_is_bounded() {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards,
+            count: 20,
+            min_count: 0,
+            up_to: true,
+            source_id: ObjectId(100),
+            effect_kind: EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        assert_eq!(actions.len(), SELECTION_CANDIDATE_CAP);
+        assert!(matches!(
+            actions[0].action,
+            GameAction::SelectCards { ref cards } if cards.is_empty()
+        ));
+    }
+
+    #[test]
+    fn choose_from_zone_choice_large_pool_is_bounded() {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (1..=30).map(ObjectId).collect();
+        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+            player: PlayerId(0),
+            cards,
+            count: 4,
+            up_to: true,
+            constraint: None,
+            source_id: ObjectId(100),
+        };
+
+        let actions = candidate_actions_broad(&state);
+        assert_eq!(actions.len(), SELECTION_CANDIDATE_CAP);
+    }
+
+    #[test]
+    fn exact_selection_count_above_pool_cap_keeps_progress_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
+        state.waiting_for = WaitingFor::ConniveDiscard {
+            player: PlayerId(0),
+            conniver_id: ObjectId(100),
+            source_id: ObjectId(100),
+            cards,
+            count: SELECTION_POOL_CAP + 1,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0].action,
+            GameAction::SelectCards { ref cards } if cards.len() == SELECTION_POOL_CAP + 1
+        ));
     }
 
     #[test]
