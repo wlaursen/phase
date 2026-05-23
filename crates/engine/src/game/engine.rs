@@ -623,6 +623,43 @@ mod auto_pass_decision_tests {
     }
 
     #[test]
+    fn until_end_of_turn_does_not_auto_submit_available_blockers() {
+        let waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(10)],
+            valid_block_targets: [(ObjectId(10), vec![ObjectId(20)])].into_iter().collect(),
+        };
+        let mut state = GameState {
+            phase: Phase::DeclareBlockers,
+            active_player: PlayerId(1),
+            waiting_for: waiting_for.clone(),
+            ..GameState::default()
+        };
+        state
+            .auto_pass
+            .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for,
+            log_entries: Vec::new(),
+        };
+        run_auto_pass_loop(&mut state, &mut result);
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::DeclareBlockers {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "the defender's auto-pass session should stay armed after pausing for legal blockers"
+        );
+    }
+
+    #[test]
     fn until_stack_empty_resolves_large_stack_in_one_apply() {
         let mut state = priority_state();
         for idx in 0..264 {
@@ -891,22 +928,19 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
             }
 
-            // Auto-submit empty blockers when there's nothing to choose:
-            //   (a) the defender is in UntilEndOfTurn mode, OR
-            //   (b) no legal blocks are available — CR 509.1 says the turn-based action
-            //       still runs, and CR 117.1c requires the active player to receive
-            //       priority during the step (instants and Ninjutsu-family activations
-            //       per CR 702.49 — notably Sneak, which is restricted to this step).
-            // A phase stop on Declare Blockers overrides both paths regardless of
-            // whether an auto-pass session is active: if the player explicitly asked
-            // to pause here, honor it.
+            // Auto-submit empty blockers only when there's nothing to choose.
+            // CR 509.1 says the turn-based action still runs when no legal blocks
+            // are available, and CR 117.1c requires the active player to receive
+            // priority during the step (instants and Ninjutsu-family activations
+            // per CR 702.49 — notably Sneak, which is restricted to this step).
+            // A phase stop on Declare Blockers overrides this even without an
+            // auto-pass session: if the player explicitly asked to pause here,
+            // honor it.
             WaitingFor::DeclareBlockers {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
-                && (valid_blocker_ids.is_empty() || end_of_turn_active(state, *player)) =>
-            {
+            } if !phase_stop_hit(state, *player) && valid_blocker_ids.is_empty() => {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
