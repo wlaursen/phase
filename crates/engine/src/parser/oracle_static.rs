@@ -6306,7 +6306,7 @@ fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str
         })
 }
 
-/// CR 601.2 + CR 601.3a + CR 604.1: Parse the "<SUBJECT> who has cast a [type] spell
+/// CR 601.2 + CR 601.3a + CR 604.1: Parse the "<SUBJECT> who has/have cast a [type] spell
 /// this turn can't cast additional [type] spells." phrasing (Ethersworn Canonist) into
 /// the equivalent `PerTurnCastLimit { max: 1, spell_filter: <type> }`.
 ///
@@ -6335,21 +6335,25 @@ fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option
 
     // 2. Nom dispatch on the predicate: assemble the conditional-cast grammar as
     //    composed combinators.
-    //   "who has cast " ("a " | "an ") <SUBJECT_TYPE>
-    //   " spell this turn can't cast additional " <OBJECT_TYPE> " spells" "."?
+    //   ("who has cast " | "who have cast ") ("a " | "an ") <SUBJECT_TYPE>
+    //   " spell this turn can't cast additional " <OBJECT_TYPE> (" spell" | " spells") "."?
     //
     // `take_until` is the canonical nom combinator for "everything up to delimiter",
     // the structural counterpart to manually slicing on a found substring.
     let mut parser = (
-        tag::<_, _, OracleError<'_>>("who has cast "),
+        alt((
+            tag::<_, _, OracleError<'_>>("who has cast "),
+            tag("who have cast "),
+        )),
         alt((tag("a "), tag("an "))),
-        take_until(" spell this turn can't cast additional "),
-        tag(" spell this turn can't cast additional "),
-        take_until(" spells"),
-        tag(" spells"),
+        take_until(" spell"),
+        tag(" spell"),
+        tag(" this turn can't cast additional "),
+        take_until(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
         opt(tag(".")),
     );
-    let (rest, (_, _, subject_type_text, _, object_type_text, _, _)) =
+    let (rest, (_, _, subject_type_text, _, _, object_type_text, _, _)) =
         parser.parse(predicate).ok()?;
     // Disallow trailing content — we matched the entire restriction sentence.
     if !rest.trim().is_empty() {
@@ -16251,15 +16255,47 @@ mod tests {
     }
 
     #[test]
+    fn per_turn_cast_limit_conditional_subject_plural_agreement() {
+        // Sibling coverage: plural subjects use "who have cast", and the parser
+        // should still flow through the shared subject and type-filter axes.
+        let def = parse_static_line(
+            "Players who have cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, max, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_singular_additional_spell() {
+        // Sibling coverage: some Oracle-style restrictions use singular
+        // "additional [type] spell" rather than plural "spells".
+        let def = parse_static_line(
+            "Each player who has cast an instant spell this turn can't cast additional instant spell.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { spell_filter, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+    }
+
+    #[test]
     fn per_turn_cast_limit_conditional_subject_you_scope() {
-        // Class test (subject axis): "You who have cast..." would not be natural
-        // English, but the helper accepts the "you " subject prefix; we lock in
+        // Class test (subject axis): the helper accepts the "you " subject prefix;
+        // we lock in
         // the building-block behavior for completeness across the
         // `strip_casting_prohibition_subject` outputs that have a trailing space
-        // suitable for the "who has cast" continuation. The "you " arm of the
+        // suitable for the "who have cast" continuation. The "you " arm of the
         // shared subject helper covers cards like Arcane Laboratory variants.
         let def = parse_static_line(
-            "You who has cast a creature spell this turn can't cast additional creature spells.",
+            "You who have cast a creature spell this turn can't cast additional creature spells.",
         )
         .unwrap();
         let StaticMode::PerTurnCastLimit { who, .. } = &def.mode else {
