@@ -22298,6 +22298,61 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn targeted_keyword_choice_grant_uses_target_only_then_choose_one_of() {
+        let def = parse_effect_chain(
+            "Target Mouse you control gains your choice of double strike or trample until end of turn",
+            AbilityKind::Spell,
+        );
+
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = &*def.effect
+        else {
+            panic!("expected TargetOnly head, got {:?}", def.effect);
+        };
+        assert_eq!(target.controller, Some(ControllerRef::You));
+        assert!(target
+            .type_filters
+            .contains(&TypeFilter::Subtype("Mouse".to_string())));
+
+        let choice = def
+            .sub_ability
+            .as_deref()
+            .expect("targeted keyword choice must chain a choice prompt");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 2);
+
+        for (branch, keyword) in [
+            (&branches[0], Keyword::DoubleStrike),
+            (&branches[1], Keyword::Trample),
+        ] {
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } = &*branch.effect
+            else {
+                panic!(
+                    "expected keyword GenericEffect branch, got {:?}",
+                    branch.effect
+                );
+            };
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(*target, None);
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTarget)
+            );
+            assert!(static_abilities[0]
+                .modifications
+                .contains(&ContinuousModification::AddKeyword { keyword }));
+        }
+    }
+
     /// Issue #501 FOLLOW-UP — ROOT CAUSE A building-block test. A "gains
     /// suspend" continuous keyword grant carries `Duration::Permanent` (CR
     /// 702.62b + CR 611.2a): the suspend mechanic owns the card's lifetime, so
