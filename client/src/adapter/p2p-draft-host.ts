@@ -54,6 +54,8 @@ export type DraftHostEvent =
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
   | { type: "allDecksSubmitted" }
+  | { type: "draftPaused"; reason: string }
+  | { type: "draftResumed" }
   | { type: "error"; message: string }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
@@ -61,6 +63,22 @@ export type DraftHostEvent =
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced"; newRound: number }
   | { type: "timerExpired" }
+  | {
+      type: "bo3SideboardPrompt";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      loserSeat: number | null;
+      timerMs: number;
+    }
+  | {
+      type: "bo3ChoosePlayDraw";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      timerMs: number;
+    }
+  | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
   | { type: "bo3GameStarted"; matchId: string; gameNumber: number };
@@ -146,6 +164,8 @@ export class P2PDraftHost {
   // Server backup upload state (D-08)
   private backupEndpoint: string | null = null;
   private picksSinceLastBackup = 0;
+  private persistQueue = Promise.resolve();
+  private persistenceClosed = false;
   private static readonly BACKUP_INTERVAL_PICKS = 5;
 
   constructor(
@@ -322,6 +342,9 @@ export class P2PDraftHost {
           view,
           draftCode: this.draftCode,
         });
+        if (view.status === "MatchInProgress") {
+          await this.dispatchMatchLaunchesForSeat(view, seat!);
+        }
       } catch (err) {
         console.error("[P2PDraftHost] reconnect view failed:", err);
       }
@@ -343,6 +366,7 @@ export class P2PDraftHost {
     if (this.disconnectedSeats.size === 0 && this.paused) {
       this.paused = false;
       this.broadcastToGuests({ type: "draft_resumed" });
+      this.emit({ type: "draftResumed" });
     }
   }
 
@@ -648,6 +672,7 @@ export class P2PDraftHost {
     if (!this.paused) {
       this.paused = true;
       this.broadcastToGuests({ type: "draft_paused", reason: "Player disconnected" });
+      this.emit({ type: "draftPaused", reason: "Player disconnected" });
     }
 
     this.emit({ type: "seatDisconnected", seatIndex: seat });
@@ -778,9 +803,13 @@ export class P2PDraftHost {
         await this.dispatchMatchLaunch(pairing, view);
       }
 
+      const latestView = await this.adapter.getViewForSeat(0);
+
       // Broadcast updated views
       await this.broadcastViews();
-      this.emit({ type: "pairingsGenerated", round, pairings: view.pairings });
+      this.persistSession();
+      this.emit({ type: "pairingsGenerated", round, pairings: latestView.pairings });
+      this.emit({ type: "viewUpdated", view: latestView });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to generate pairings: ${message}` });
@@ -872,6 +901,16 @@ export class P2PDraftHost {
     });
   }
 
+  private async dispatchMatchLaunchesForSeat(view: DraftPlayerView, seat: number): Promise<void> {
+    for (const pairing of view.pairings) {
+      if (pairing.round !== view.current_round) continue;
+      if (pairing.status !== "Pending" && pairing.status !== "InProgress") continue;
+      if (pairing.seat_a !== seat && pairing.seat_b !== seat) continue;
+
+      await this.dispatchMatchLaunch(pairing, view);
+    }
+  }
+
   private isBotSeatFromView(view: DraftPlayerView, seat: number): boolean {
     return view.seats.find((s) => s.seat_index === seat)?.is_bot ?? this.isBotSeat(seat);
   }
@@ -926,14 +965,12 @@ export class P2PDraftHost {
 
       // Broadcast updated views with new standings
       await this.broadcastViews();
+      this.persistSession();
+      this.emit({ type: "viewUpdated", view });
 
       // Check if the reducer auto-advanced (Competitive mode)
-      if (view.status === "RoundComplete" || view.status === "Complete") {
-        const hostView = await this.adapter.getViewForSeat(0);
-        this.emit({ type: "viewUpdated", view: hostView });
-        if (view.status === "Complete") {
-          void this.cleanupServerBackup();
-        }
+      if (view.status === "Complete") {
+        void this.cleanupServerBackup();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -964,6 +1001,7 @@ export class P2PDraftHost {
     try {
       await this.adapter.replaceSeatWithBot(seat);
       await this.broadcastViews();
+      this.persistSession();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to replace seat ${seat}: ${message}` });
@@ -1111,8 +1149,39 @@ export class P2PDraftHost {
   private sendToSeat(seat: number, msg: DraftP2PMessage): void {
     if (seat === 0) {
       // Host is seat 0 — emit event directly instead of sending over network
-      if (msg.type === "draft_match_start") {
-        this.emit({ type: "matchStart", launch: msg.launch });
+      switch (msg.type) {
+        case "draft_match_start":
+          this.emit({ type: "matchStart", launch: msg.launch });
+          break;
+        case "draft_bo3_sideboard_prompt":
+          this.emit({
+            type: "bo3SideboardPrompt",
+            matchId: msg.matchId,
+            gameNumber: msg.gameNumber,
+            score: msg.score,
+            loserSeat: msg.loserSeat,
+            timerMs: msg.timerMs,
+          });
+          break;
+        case "draft_bo3_play_draw_prompt":
+          this.emit({
+            type: "bo3ChoosePlayDraw",
+            matchId: msg.matchId,
+            gameNumber: msg.gameNumber,
+            score: msg.score,
+            timerMs: msg.timerMs,
+          });
+          break;
+        case "draft_bo3_game_start":
+          this.emit({
+            type: "bo3GameStart",
+            matchId: msg.matchId,
+            gameNumber: msg.gameNumber,
+            firstPlayerSeat: msg.firstPlayerSeat,
+          });
+          break;
+        default:
+          break;
       }
       return;
     }
@@ -1152,6 +1221,7 @@ export class P2PDraftHost {
       this.clearActiveTimer();
       this.paused = true;
       this.broadcastToGuests({ type: "draft_paused", reason: "Paused by host" });
+      this.emit({ type: "draftPaused", reason: "Paused by host" });
     }
   }
 
@@ -1159,6 +1229,7 @@ export class P2PDraftHost {
     if (this.paused && this.disconnectedSeats.size === 0) {
       this.paused = false;
       this.broadcastToGuests({ type: "draft_resumed" });
+      this.emit({ type: "draftResumed" });
       // Restart timer if still in drafting phase
       if (this.draftStarted && this.podPolicy === "Competitive") {
         void (async () => {
@@ -1176,12 +1247,14 @@ export class P2PDraftHost {
   // ── Persistence (P2P-05) ──────────────────────────────────────────
 
   private persistSession(): void {
-    if (!this.persistenceId) return;
-    void (async () => {
+    if (!this.persistenceId || this.persistenceClosed) return;
+    this.persistQueue = this.persistQueue.then(async () => {
       try {
+        if (this.persistenceClosed) return;
         const sessionJson = this.draftStarted
           ? await this.adapter.exportSession()
           : null;
+        if (this.persistenceClosed) return;
 
         const snapshot: PersistedDraftHostSession = {
           persistenceId: this.persistenceId!,
@@ -1211,7 +1284,7 @@ export class P2PDraftHost {
       } catch (err) {
         console.warn("[P2PDraftHost] persist failed:", err);
       }
-    })();
+    });
   }
 
   /**
@@ -1282,6 +1355,14 @@ export class P2PDraftHost {
 
       if (this.disconnectedSeats.size > 0) {
         this.paused = true;
+        this.emit({ type: "draftPaused", reason: "Waiting for players to reconnect" });
+      }
+
+      if (view.status === "MatchInProgress") {
+        await this.dispatchMatchLaunchesForSeat(view, 0);
+      } else if (view.status === "Pairing" && view.pairings.length === 0) {
+        await this.generatePairings(view.current_round + 1);
+        return this.adapter.getViewForSeat(0);
       }
 
       return view;
@@ -1311,8 +1392,10 @@ export class P2PDraftHost {
     for (const session of this.guestSessions.values()) {
       await session.send({ type: "draft_host_left", reason: "Host left the draft" });
     }
+    this.persistenceClosed = true;
+    await this.persistQueue;
     if (this.persistenceId) {
-      void clearDraftHostSession(this.persistenceId);
+      await clearDraftHostSession(this.persistenceId);
     }
     void this.cleanupServerBackup();
     this.dispose();

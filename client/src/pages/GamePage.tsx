@@ -2057,6 +2057,7 @@ function GameOverScreen({
   const source = searchParams.get("source");
   const draftId = searchParams.get("draftId");
   const isDraft = source === "draft" && !!draftId;
+  const isDraftPodMatch = mode === "draft-match";
   const gameId = useGameStore((s) => s.gameId);
 
   const [resultRecorded, setResultRecorded] = useState(false);
@@ -2174,6 +2175,17 @@ function GameOverScreen({
                 {runOver
                   ? t("gamePage.gameOver.backToDraft")
                   : t("gamePage.gameOver.continueRun")}
+              </button>
+            ) : isDraftPodMatch ? (
+              <button
+                onClick={() => navigate("/draft-pod")}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {t("gamePage.gameOver.backToDraft")}
               </button>
             ) : isOnlineMode ? (
               <button

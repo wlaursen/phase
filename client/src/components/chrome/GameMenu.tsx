@@ -44,6 +44,7 @@ export function GameMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const cardDataMeta = useCardDataMeta();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
+  const isDraftPodMatch = searchParams.get("mode") === "draft-match";
 
   useEffect(() => {
     if (!open) return;
@@ -151,6 +152,8 @@ export function GameMenu({
                   clearGame(gameId);
                   navigate("/draft/quick?resume=1");
                 });
+              } else if (isDraftPodMatch) {
+                navigate("/draft-pod");
               } else {
                 clearGame(gameId);
                 navigate("/");
@@ -158,7 +161,7 @@ export function GameMenu({
             }}
           />
           <MenuButton
-            label={isDraft ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
+            label={isDraft || isDraftPodMatch ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
             onClick={() => {
               setOpen(false);
               if (isDraft) {
@@ -166,6 +169,8 @@ export function GameMenu({
                   clearGame(gameId);
                   navigate("/draft/quick?resume=1");
                 });
+              } else if (isDraftPodMatch) {
+                navigate("/draft-pod");
               } else {
                 navigate("/");
               }

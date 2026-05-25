@@ -692,14 +692,6 @@ export function DraftPodPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      void leave(true);
-      resetPod();
-    };
-  }, [leave, resetPod]);
-
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
     void resumeHostedPod();
@@ -715,7 +707,7 @@ export function DraftPodPage() {
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
-      <ScreenChrome onBack={showBack ? () => navigate("/") : undefined} />
+      <ScreenChrome onBack={showBack ? handleLeave : undefined} />
 
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
         {phaseContent(phase, handleLeave)}

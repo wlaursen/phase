@@ -180,6 +180,64 @@ describe("multiplayerDraftStore", () => {
       expect(state.total).toBe(8);
       expect(state.seats).toHaveLength(1);
     });
+
+    it("projects restored MatchInProgress views into match phase", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      const view = mockView("MatchInProgress");
+      capturedHostEventHandler!({ type: "viewUpdated", view });
+
+      const state = useMultiplayerDraftStore.getState();
+      expect(state.phase).toBe("matchInProgress");
+      expect(state.view).toBe(view);
+    });
+
+    it("handles host-seat Bo3 prompt messages", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Traditional",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      capturedHostEventHandler!({
+        type: "bo3ChoosePlayDraw",
+        matchId: "match-1",
+        gameNumber: 2,
+        score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+        timerMs: 10_000,
+      });
+
+      let state = useMultiplayerDraftStore.getState();
+      expect(state.playDrawPrompt).toEqual({
+        matchId: "match-1",
+        gameNumber: 2,
+        score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+        timerMs: 10_000,
+      });
+      expect(state.timerRemainingMs).toBe(10_000);
+
+      capturedHostEventHandler!({
+        type: "bo3GameStart",
+        matchId: "match-1",
+        gameNumber: 2,
+        firstPlayerSeat: 0,
+      });
+
+      state = useMultiplayerDraftStore.getState();
+      expect(state.phase).toBe("matchInProgress");
+      expect(state.playDrawPrompt).toBeNull();
+      expect(state.sideboardSubmitted).toBe(false);
+    });
   });
 
   describe("joinDraft", () => {
