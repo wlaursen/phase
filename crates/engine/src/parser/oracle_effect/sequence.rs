@@ -730,7 +730,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
-    if starts_clause_text(trimmed) || starts_with_damage_clause(&trimmed_lower) {
+    if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
@@ -744,7 +744,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         {
             return None;
         }
-        if starts_clause_text(after_and) || starts_with_damage_clause(after_and) {
+        if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
     }
@@ -3714,6 +3714,21 @@ mod tests {
     fn conjugated_verb_sacrifices_splits_after_then() {
         let chunks = clause_texts("creates a token, then sacrifices a creature");
         assert_eq!(chunks, vec!["creates a token", "sacrifices a creature"]);
+    }
+
+    #[test]
+    fn comma_conjugated_player_predicates_split() {
+        let chunks = clause_texts(
+            "target opponent sacrifices a creature, discards a card, and loses 3 life",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "target opponent sacrifices a creature",
+                "discards a card",
+                "and loses 3 life"
+            ]
+        );
     }
 
     #[test]

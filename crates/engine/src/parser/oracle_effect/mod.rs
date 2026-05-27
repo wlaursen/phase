@@ -11179,6 +11179,12 @@ pub(crate) fn parse_effect_chain_ir(
     // ScopedPlayer, "you" → OriginalController). Reset at the next `Sentence`
     // boundary, so a following independent instruction is unaffected.
     let mut decline_consequence_active = false;
+    // CR 608.2c: Within one sentence, English can state a targeted player
+    // subject once and then continue with conjugated predicates:
+    // "target opponent sacrifices ..., discards ..., and loses ...". Carry the
+    // targeted player subject so the bare conjugated continuations inherit the
+    // same player target rather than falling back to the ability controller.
+    let mut carried_targeted_player_subject: Option<SubjectApplication> = None;
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -12137,6 +12143,11 @@ pub(crate) fn parse_effect_chain_ir(
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
+        let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
+        let inherits_carried_targeted_player_subject = leading_subject_application.is_none()
+            && player_scope.is_none()
+            && !sequence::starts_clause_text(&text)
+            && sequence::starts_clause_text_or_conjugated(&text);
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -12406,6 +12417,18 @@ pub(crate) fn parse_effect_chain_ir(
         // to `Some(ScopedPlayer)` so the life loss hits the declining opponent.
         if is_decline_consequence {
             rebind_decline_body_recipients(&mut clause);
+        }
+        if inherits_carried_targeted_player_subject {
+            if let Some(subject) = carried_targeted_player_subject.as_ref() {
+                let subject = SubjectPhraseAst {
+                    affected: subject.affected.clone(),
+                    target: subject.target.clone(),
+                    multi_target: subject.multi_target.clone(),
+                    inherits_parent: subject.inherits_parent,
+                    is_optional: subject.is_optional,
+                };
+                inject_subject_target(&mut clause.effect, &subject);
+            }
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
@@ -12947,6 +12970,17 @@ pub(crate) fn parse_effect_chain_ir(
         // "for each opponent who doesn't" body.
         if chunk.boundary_after == Some(ClauseBoundary::Sentence) {
             decline_consequence_active = false;
+        }
+        if chunk.boundary_after == Some(ClauseBoundary::Sentence) {
+            carried_targeted_player_subject = None;
+        } else if let Some(application) = leading_subject_application {
+            carried_targeted_player_subject = application
+                .target
+                .as_ref()
+                .is_some_and(target_filter_can_target_player)
+                .then_some(application);
+        } else if !inherits_carried_targeted_player_subject {
+            carried_targeted_player_subject = None;
         }
     }
 
@@ -22835,6 +22869,73 @@ mod tests {
                     },
                 },
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_player_subject_carries_to_conjugated_predicates() {
+        let def = parse_effect_chain(
+            "Target opponent sacrifices a creature or planeswalker of their choice, discards a card, and loses 3 life. You draw a card and gain 3 life.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Sacrifice { target, .. } = &*def.effect else {
+            panic!("expected Sacrifice root, got {:?}", def.effect);
+        };
+        assert_eq!(
+            target_filter_controller_ref(target),
+            Some(ControllerRef::TargetPlayer)
+        );
+
+        let discard = def.sub_ability.as_ref().expect("expected discard link");
+        let Effect::Discard { target, .. } = &*discard.effect else {
+            panic!("expected Discard link, got {:?}", discard.effect);
+        };
+        assert!(
+            target_filter_can_target_player(target),
+            "carried discard target must be a player target, got {target:?}"
+        );
+        assert_eq!(
+            target_filter_controller_ref(target),
+            Some(ControllerRef::Opponent)
+        );
+
+        let lose_life = discard
+            .sub_ability
+            .as_ref()
+            .expect("expected lose-life link");
+        let Effect::LoseLife {
+            target: Some(target),
+            amount: QuantityExpr::Fixed { value: 3 },
+        } = &*lose_life.effect
+        else {
+            panic!("expected LoseLife(3) link, got {:?}", lose_life.effect);
+        };
+        assert!(
+            target_filter_can_target_player(target),
+            "carried life-loss target must be a player target, got {target:?}"
+        );
+        assert_eq!(
+            target_filter_controller_ref(target),
+            Some(ControllerRef::Opponent)
+        );
+
+        let draw = lose_life.sub_ability.as_ref().expect("expected draw link");
+        assert!(matches!(
+            &*draw.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        ));
+
+        let gain_life = draw.sub_ability.as_ref().expect("expected gain-life link");
+        assert!(matches!(
+            &*gain_life.effect,
+            Effect::GainLife {
+                player: GainLifePlayer::Controller,
+                amount: QuantityExpr::Fixed { value: 3 },
             }
         ));
     }
