@@ -286,12 +286,12 @@ Do not push unless the user requested pushing or the invocation explicitly says 
 `main` is protected by a GitHub merge queue. The enqueue command is:
 
 ```bash
-gh pr merge <PR> --squash --auto
+gh pr merge <PR> --auto
 ```
 
 `--auto` under a merge queue means "add to queue when required checks pass." The queue speculatively rebases the PR against the latest `main`, runs CI once on the synthesized future-main commit (batching up to the configured group size with any other queued PRs), and merges all green PRs in order. Failed PRs are bisected out of the group and kicked back to the author.
 
-**Squash is the only merge method allowed on `main`.** Do not pass `--merge` or `--rebase`. The repo's `allow_merge_commit` and `allow_rebase_merge` are both disabled, so those flags will fail — but pass `--squash` explicitly anyway.
+**The merge queue dictates the merge method (squash).** Do not pass `--squash`, `--merge`, or `--rebase` — the queue's ruleset overrides per-call flags. Passing a strategy flag triggers a CLI advisory ("The merge strategy for main is set by the merge queue") and is a no-op.
 
 ### Authorization
 
@@ -316,7 +316,7 @@ Every item must be satisfied before running `gh pr merge`. Failing any item mean
 
 ### After enqueue
 
-After running `gh pr merge <PR> --squash --auto`:
+After running `gh pr merge <PR> --auto`:
 
 1. Capture the auto-merge confirmation (the CLI prints "Pull request #N will be automatically merged via the merge queue when all requirements are met" or similar).
 2. Do NOT wait for the queue to land the PR — the queue is async and may take minutes (CI run + queue position). Move on to the next PR in the batch.
@@ -337,7 +337,7 @@ For each PR, report:
 - verification commands and results
 - commits created and push status
 - **enqueue status**:
-  - In **default mode** (no enqueue authority): the exact `gh pr merge <PR> --squash --auto` command for the maintainer to run, OR an explicit reason not to enqueue (hard-stop security issue, blocking review comment, requires full-cycle work first, etc.).
+  - In **default mode** (no enqueue authority): the exact `gh pr merge <PR> --auto` command for the maintainer to run, OR an explicit reason not to enqueue (hard-stop security issue, blocking review comment, requires full-cycle work first, etc.).
   - In **authorized mode**: `enqueued: yes` (with timestamp + any queue-position output from the CLI), OR `enqueued: no` with the failed enqueue-checklist item(s) and evidence.
 
 Include evidence for claims, mark assumptions separately, and state confidence. Also include a short self-challenge: what evidence would contradict the conclusion that the PR is ready?
