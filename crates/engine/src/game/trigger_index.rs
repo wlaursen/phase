@@ -190,8 +190,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::CounterAdded
         | TriggerMode::CounterAddedOnce
         | TriggerMode::CounterAddedAll
-        | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll => push(TriggerEventKey::CounterAdded),
+        // CR 107.14: "Whenever you get one or more {E}" — energy uses the
+        // player-counter event key, not the object-counter key.
+        TriggerMode::CounterPlayerAddedAll => push(TriggerEventKey::PlayerCounterChanged),
         TriggerMode::CounterRemoved | TriggerMode::CounterRemovedOnce => {
             push(TriggerEventKey::CounterRemoved);
         }
