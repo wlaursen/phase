@@ -3502,6 +3502,22 @@ fn resolve_chain_body(
                 }
             }
         }
+        // CR 608.2c: After a `player_scope: All` sacrifice clause completes,
+        // publish the full scoped event slice so downstream "if you sacrificed
+        // a permanent this way" / ZoneChangedThisWay gates see every player's
+        // sacrifice — not only the last iteration's overwrite of
+        // `last_zone_changed_ids`.
+        let mut ids: Vec<ObjectId> = scoped_events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { object_id, .. }
+                | GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        ids.dedup();
+        state.last_zone_changed_ids = ids;
         if next_sub_needs_tracked_set(ability) {
             publish_tracked_set(state, affected_ids);
         }
@@ -4852,6 +4868,40 @@ fn resolve_chain_body(
     Ok(())
 }
 
+/// CR 608.2c + CR 109.5: Spell-effect "if you sacrificed a [filter] this way"
+/// (Deadly Brew, Rise of the Witch-king) when no activation-cost object is in
+/// scope. Consults the chain tracked sacrifice set (or the scoped
+/// `last_zone_changed_ids` snapshot) and requires a match sacrificed by the
+/// printed controller.
+fn controller_sacrificed_matching_this_way(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    let controller = ability.original_controller.unwrap_or(ability.controller);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+
+    let candidate_ids: Vec<ObjectId> = state
+        .chain_tracked_set_id
+        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| state.last_zone_changed_ids.clone());
+
+    candidate_ids.iter().any(|&id| {
+        if let Some(lki) = state.lki_cache.get(&id) {
+            lki.controller == controller
+                && crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                )
+        } else if let Some(obj) = state.objects.get(&id) {
+            obj.controller == controller
+                && crate::game::filter::matches_target_filter(state, id, filter, &ctx)
+        } else {
+            false
+        }
+    })
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -5195,7 +5245,7 @@ pub(crate) fn evaluate_condition(
                 .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
         }
         AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
-            ability.cost_paid_object.as_ref().is_some_and(|snapshot| {
+            if let Some(snapshot) = &ability.cost_paid_object {
                 crate::game::filter::matches_target_filter_on_lki_snapshot(
                     state,
                     snapshot.object_id,
@@ -5203,7 +5253,9 @@ pub(crate) fn evaluate_condition(
                     filter,
                     &crate::game::filter::FilterContext::from_ability(ability),
                 )
-            })
+            } else {
+                controller_sacrificed_matching_this_way(state, ability, filter)
+            }
         }
         // CR 611.2b: "if this creature/permanent is tapped" — check source object.
         // For the untapped sense, wrap with `Not`.
