@@ -5269,11 +5269,6 @@ fn handle_play_land(
                     crate::game::zone_pipeline::DeliveryCtx {
                         source_id: None,
                         exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
-                        // `played_from_zone` is set FRESH after the move via
-                        // `mark_land_played_from_zone` (this site stamps the play
-                        // origin; it is not preserving a pre-move value), so the
-                        // ctx re-stamp knob stays `None`.
-                        played_from_zone: None,
                         drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
                     },
                     events,
@@ -5296,9 +5291,9 @@ fn handle_play_land(
                 }
                 // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
                 // was played from") so effects can find the permanent the
-                // played land became. Set fresh AFTER delivery — the ctx
-                // re-stamp knob is for preserving a pre-move value, which this
-                // site does not have (it is recording a brand-new origin).
+                // played land became. Stamped fresh AFTER delivery (this site
+                // records a brand-new origin); the stamp then survives until
+                // battlefield EXIT (`reset_for_battlefield_exit`).
                 mark_land_played_from_zone(state, object_id, origin_zone);
             }
 
