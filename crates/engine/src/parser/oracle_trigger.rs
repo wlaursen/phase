@@ -8570,9 +8570,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
 ///   triggers, the effect is self-limiting (the game ends, the source leaves
 ///   the battlefield, or counters fall below the threshold before re-checking);
 ///   the parser does not enforce this constraint structurally.
-fn try_parse_source_counter_state_trigger(
-    lower: &str,
-) -> Option<(TriggerMode, TriggerDefinition)> {
+fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
         .parse(lower)
         .ok()?;
@@ -27329,9 +27327,10 @@ mod tests {
         use crate::game::zones::create_object;
         use crate::parser::oracle::parse_oracle_text;
         use crate::types::game_state::WaitingFor;
-        use crate::types::identifiers::{CardId, PlayerId};
+        use crate::types::identifiers::CardId;
         use crate::types::phase::Phase;
-        use crate::types::zone::Zone;
+        use crate::types::zones::Zone;
+        use crate::types::PlayerId;
         use std::sync::Arc;
 
         const ORACLE: &str = "Indestructible\n\
@@ -27348,7 +27347,10 @@ mod tests {
 
         // Confirm the state trigger was parsed — shape check before the runtime test.
         assert!(
-            parsed.triggers.iter().any(|t| t.mode == TriggerMode::StateCondition),
+            parsed
+                .triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::StateCondition),
             "Darksteel Reactor must parse a StateCondition trigger; got {:?}",
             parsed.triggers,
         );
@@ -27372,12 +27374,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&reactor_id).unwrap();
             obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
-            obj.trigger_definitions = Arc::new(parsed.triggers.clone());
+            obj.trigger_definitions = parsed.triggers.clone().into();
             obj.controller = PlayerId(0);
-            obj.counters.insert(
-                CounterType::Generic("charge".to_string()),
-                20,
-            );
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), 20);
         }
 
         // CR 603.8: call check_state_triggers, which sees the reactor has 20 charge
