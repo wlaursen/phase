@@ -87,18 +87,30 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
             '}' => brace_depth = brace_depth.saturating_sub(1),
             ',' if brace_depth == 0 => {
                 let part = text[start..i].trim();
-                if !part.is_empty() {
-                    parts.push(part);
+                // CR 118.12b: "Remove N counters from among [type], [type], and [type] you
+                // control" is one cost — commas separate type alternatives inside the "from
+                // among" target phrase, not independent cost parts.
+                // allow-noncombinator: look-back on accumulated segment buffer; "from among" is a structural sentinel, not parser dispatch
+                if !part.to_lowercase().contains("from among") {
+                    if !part.is_empty() {
+                        parts.push(part);
+                    }
+                    start = i + 1;
                 }
-                start = i + 1;
             }
             ' ' if brace_depth == 0 && bytes[i..].starts_with(b" and ") => {
                 let part = text[start..i].trim();
-                if !part.is_empty() {
-                    parts.push(part);
+                // allow-noncombinator: look-back on accumulated segment buffer; "from among" is a structural sentinel, not parser dispatch
+                if part.to_lowercase().contains("from among") {
+                    // Inside a "from among" type list — skip past " and " without splitting.
+                    i += " and ".len() - 1;
+                } else {
+                    if !part.is_empty() {
+                        parts.push(part);
+                    }
+                    start = i + " and ".len();
+                    i += " and ".len() - 1;
                 }
-                start = i + " and ".len();
-                i += " and ".len() - 1;
             }
             _ => {}
         }
@@ -2191,6 +2203,50 @@ mod tests {
                 );
             }
             other => panic!("Expected from-among RemoveCounter cost, got {:?}", other),
+        }
+    }
+
+    /// Regression: Tekuthal's activation cost is "{1}{U/P}{U/P}, Remove three counters from
+    /// among other artifacts, creatures, and planeswalkers you control". The comma-separated
+    /// type list is part of a single RemoveCounter cost, not three separate cost parts.
+    /// Reverts to three Unimplemented parts (coverage gap) if split_cost_parts incorrectly
+    /// breaks on the internal commas.
+    #[test]
+    fn cost_tekuthal_remove_three_counters_from_among_or_types() {
+        match parse_oracle_cost(
+            "{1}{U/P}{U/P}, Remove three counters from among other artifacts, creatures, and planeswalkers you control",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2, "expected mana + remove-counter, got {:?}", costs);
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }), "part 0 should be Mana");
+                match &costs[1] {
+                    AbilityCost::RemoveCounter { count, counter_type, target: Some(target), selection } => {
+                        assert_eq!(*count, 3);
+                        assert_eq!(*counter_type, CounterMatch::Any);
+                        assert_eq!(*selection, CounterCostSelection::AmongObjects);
+                        match target {
+                            TargetFilter::Or { filters } => {
+                                assert_eq!(filters.len(), 3, "expected 3 OR legs (artifact|creature|planeswalker), got {filters:?}");
+                                let types: Vec<_> = filters.iter().filter_map(|f| {
+                                    if let TargetFilter::Typed(t) = f { Some(t) } else { None }
+                                }).collect();
+                                assert_eq!(types.len(), 3, "all legs should be Typed filters");
+                                for typed in &types {
+                                    assert_eq!(typed.controller, Some(ControllerRef::You), "each leg needs 'you control'");
+                                    assert!(typed.properties.contains(&FilterProp::Another), "each leg needs 'other'");
+                                }
+                                let all_types: Vec<TypeFilter> = types.iter().flat_map(|t| t.type_filters.iter().cloned()).collect();
+                                assert!(all_types.iter().any(|t| matches!(t, TypeFilter::Artifact)));
+                                assert!(all_types.iter().any(|t| matches!(t, TypeFilter::Creature)));
+                                assert!(all_types.iter().any(|t| matches!(t, TypeFilter::Planeswalker)));
+                            }
+                            other => panic!("expected Or filter for 3-type cost, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected RemoveCounter with target, got {other:?}"),
+                }
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
         }
     }
 
