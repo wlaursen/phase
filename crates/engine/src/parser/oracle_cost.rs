@@ -59,7 +59,7 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     let text = text.trim();
 
     // Split on ", " for composite costs
-    let parts: Vec<&str> = split_cost_parts(text);
+    let parts = fixup_from_among_remove_counter_parts(split_cost_parts(text));
     if parts.len() > 1 {
         let mut costs: Vec<AbilityCost> =
             parts.iter().map(|p| parse_single_cost(p.trim())).collect();
@@ -70,7 +70,7 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
         return AbilityCost::Composite { costs };
     }
 
-    parse_single_cost(text)
+    parse_single_cost(parts.first().map_or(text, String::as_str))
 }
 
 fn split_cost_parts(text: &str) -> Vec<&str> {
@@ -87,30 +87,18 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
             '}' => brace_depth = brace_depth.saturating_sub(1),
             ',' if brace_depth == 0 => {
                 let part = text[start..i].trim();
-                // CR 118.12b: "Remove N counters from among [type], [type], and [type] you
-                // control" is one cost — commas separate type alternatives inside the "from
-                // among" target phrase, not independent cost parts.
-                // allow-noncombinator: look-back on accumulated segment buffer; "from among" is a structural sentinel, not parser dispatch
-                if !part.to_lowercase().contains("from among") {
-                    if !part.is_empty() {
-                        parts.push(part);
-                    }
-                    start = i + 1;
+                if !part.is_empty() {
+                    parts.push(part);
                 }
+                start = i + 1;
             }
             ' ' if brace_depth == 0 && bytes[i..].starts_with(b" and ") => {
                 let part = text[start..i].trim();
-                // allow-noncombinator: look-back on accumulated segment buffer; "from among" is a structural sentinel, not parser dispatch
-                if part.to_lowercase().contains("from among") {
-                    // Inside a "from among" type list — skip past " and " without splitting.
-                    i += " and ".len() - 1;
-                } else {
-                    if !part.is_empty() {
-                        parts.push(part);
-                    }
-                    start = i + " and ".len();
-                    i += " and ".len() - 1;
+                if !part.is_empty() {
+                    parts.push(part);
                 }
+                start = i + " and ".len();
+                i += " and ".len() - 1;
             }
             _ => {}
         }
@@ -121,6 +109,49 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
         parts.push(last);
     }
     parts
+}
+
+/// CR 601.2b / CR 602.2b + CR 122.1: "Remove N counters from among [type],
+/// [type], and [type] you control" is one activation-cost component. The
+/// top-level splitter cannot know whether a comma belongs to a type list or to
+/// the next cost, so merge only contiguous fragments that still parse as a
+/// complete `RemoveCounter` from-among cost.
+fn fixup_from_among_remove_counter_parts(parts: Vec<&str>) -> Vec<String> {
+    let mut fixed = Vec::new();
+    let mut i = 0;
+
+    while i < parts.len() {
+        let mut part = parts[i].trim().to_string();
+        if is_from_among_remove_counter_cost(&part) {
+            let mut next = i + 1;
+            while next < parts.len() {
+                let candidate = format!("{part}, {}", parts[next].trim());
+                if !is_from_among_remove_counter_cost(&candidate) {
+                    break;
+                }
+                part = candidate;
+                next += 1;
+            }
+            fixed.push(part);
+            i = next;
+        } else {
+            fixed.push(part);
+            i += 1;
+        }
+    }
+
+    fixed
+}
+
+fn is_from_among_remove_counter_cost(text: &str) -> bool {
+    matches!(
+        parse_single_cost(text),
+        AbilityCost::RemoveCounter {
+            target: Some(_),
+            selection: CounterCostSelection::AmongObjects,
+            ..
+        }
+    )
 }
 
 /// CR 601.2b: After comma/and-splitting, bare noun-phrase segments that follow
@@ -2247,6 +2278,47 @@ mod tests {
                 }
             }
             other => panic!("expected Composite cost, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_from_among_type_list_does_not_swallow_later_cost() {
+        match parse_oracle_cost(
+            "{1}, Remove three counters from among other artifacts, creatures, and planeswalkers you control, Sacrifice a creature",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(
+                    costs.len(),
+                    3,
+                    "expected mana + remove-counter + sacrifice, got {costs:?}"
+                );
+                assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+                assert!(matches!(
+                    costs[1],
+                    AbilityCost::RemoveCounter {
+                        target: Some(TargetFilter::Or { .. }),
+                        selection: CounterCostSelection::AmongObjects,
+                        ..
+                    }
+                ));
+                match &costs[2] {
+                    AbilityCost::Sacrifice(sacrifice) => {
+                        assert_eq!(sacrifice.requirement.fixed_count(), Some(1));
+                        match &sacrifice.target {
+                            TargetFilter::Typed(filter) => assert!(
+                                filter
+                                    .type_filters
+                                    .iter()
+                                    .any(|filter| matches!(filter, TypeFilter::Creature)),
+                                "expected creature sacrifice, got {filter:?}"
+                            ),
+                            other => panic!("expected typed creature sacrifice, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected trailing Sacrifice cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
         }
     }
 
