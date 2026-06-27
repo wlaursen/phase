@@ -7,7 +7,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
+    AutoPassMode, CombatPhaseSkipState, GameState, PendingCounterAddition, PendingEffectResolved,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -608,6 +609,18 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.attacked_defenders_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
+    // CR 614.10 + CR 614.10a + CR 500.11: Clear a turn-scoped combat skip that
+    // was `Active` on this player's PREVIOUS (now-ended) turn. `idx` is the
+    // player whose turn is beginning here; if their slot is still `Active` it was
+    // bound and consumed by their last turn, so the skip is satisfied and this
+    // new turn has normal combat. Only an `Active` slot is cleared here — a
+    // still-`Pending` skip has not yet bound to a turn and must survive (and will
+    // be promoted to `Active` below if this is its first non-skipped turn).
+    if state.combat_phase_skip_next_turn.get(idx) == Some(&CombatPhaseSkipState::Active) {
+        if let Some(slot) = state.combat_phase_skip_next_turn.get_mut(idx) {
+            *slot = CombatPhaseSkipState::None;
+        }
+    }
     state.end_steps_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
     state.attacker_declarations_this_turn.clear();
@@ -674,6 +687,19 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.cards_drawn_this_step = 0;
         player.speed_trigger_used_this_turn = false;
         player.bending_types_this_turn.clear();
+    }
+
+    // CR 614.10 + CR 614.10a + CR 500.11: Promote a turn-scoped combat skip from
+    // `Pending` to `Active` now that the active player's first non-skipped turn
+    // has actually begun. This runs AFTER the per-turn reset region (so the
+    // `Active` slot it sets is not immediately re-cleared) and AFTER the
+    // `turns_to_skip` fast-path early-return above (so per CR 614.10a the skip
+    // binds only to a turn that isn't itself skipped). While `Active`, the
+    // replacement layer prevents every combat phase of this turn.
+    if state.combat_phase_skip_next_turn.get(idx) == Some(&CombatPhaseSkipState::Pending) {
+        if let Some(slot) = state.combat_phase_skip_next_turn.get_mut(idx) {
+            *slot = CombatPhaseSkipState::Active;
+        }
     }
 
     // CR 302.6: At the start of a player's turn, any permanent they have
