@@ -160,24 +160,32 @@ pub enum AssistState {
 /// player. Backs `GameState::combat_phase_skip_next_turn` (False Peace / Empty
 /// City Ruse: "skips all combat phases of their next turn").
 ///
-/// State machine, advanced in `start_next_turn`:
-/// `None` --(skip effect resolves)--> `Pending`
-///   --(player's first non-skipped turn begins, CR 614.10a)--> `Active`
-///   --(that turn ends; player's following turn begins)--> `None`.
+/// CR 614.10a: stacked skips are independent — two resolved effects make the
+/// player skip combat on their next *two* non-skipped turns ("one effect will be
+/// satisfied in skipping the first occurrence, while the other will remain"). So
+/// the model is a count, not a tri-state: `pending` is the number of armed skips
+/// not yet bound to a turn, and `active` marks the player's current turn as a
+/// bound skip turn. The axes are orthogonal — while a turn is `active`, further
+/// `pending` skips wait for subsequent turns.
 ///
-/// While `Active`, a virtual replacement effect prevents every combat phase of
+/// Lifecycle, advanced in `start_next_turn` for the player whose turn begins:
+/// - a skip effect resolves -> `pending += 1`
+/// - that player's previous bound turn ended -> `active = false` (skip satisfied)
+/// - this turn isn't itself skipped and `pending > 0` -> `pending -= 1`, `active = true`
+///
+/// While `active`, a virtual replacement effect prevents every combat phase of
 /// the bound turn (CR 614.10: "skip" == "instead of doing this, do nothing").
+/// `Default` (`pending: 0`, `active: false`) is "no skip armed".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CombatPhaseSkipState {
-    /// No turn-scoped combat skip armed for this player.
-    #[default]
-    None,
-    /// CR 614.10a: a skip is armed but has not yet attached to a turn; it waits
-    /// past any skipped turns and binds to the player's first non-skipped turn.
-    Pending,
-    /// The bound (non-skipped) turn is in progress; combat phases are prevented.
-    Active,
+pub struct CombatPhaseSkipState {
+    /// CR 614.10a: armed turn-scoped combat skips that have not yet bound to a
+    /// turn; each waits past skipped turns for its own non-skipped turn.
+    #[serde(default)]
+    pub pending: u32,
+    /// True while the player's current turn is a bound combat-skip turn; the
+    /// replacement layer prevents every combat phase of that turn.
+    #[serde(default)]
+    pub active: bool,
 }
 
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
@@ -7481,7 +7489,10 @@ impl GameState {
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
-            combat_phase_skip_next_turn: vec![CombatPhaseSkipState::None; player_count as usize],
+            combat_phase_skip_next_turn: vec![
+                CombatPhaseSkipState::default();
+                player_count as usize
+            ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
             seat_order,

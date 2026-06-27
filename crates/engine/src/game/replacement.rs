@@ -16,7 +16,7 @@ use super::filter::{
     matches_target_filter_on_damage_record_source, FilterContext,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CombatPhaseSkipState, GameState, PendingReplacement, WaitingFor};
+use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
@@ -4299,7 +4299,7 @@ pub fn find_applicable_replacements(
             && state
                 .combat_phase_skip_next_turn
                 .get(player_id.0 as usize)
-                == Some(&CombatPhaseSkipState::Active)
+                .is_some_and(|skip| skip.active)
         {
             let rid = turn_scoped_combat_skip_replacement_id(*player_id);
             if !event.already_applied(&rid) {

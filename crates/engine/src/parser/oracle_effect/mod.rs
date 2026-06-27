@@ -100,8 +100,8 @@ use crate::types::ability::{
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
     RoundingMode, SharedQuality, SharedQualityRelation, SkipScope, StaticCondition,
     StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition, ZoneOwner,
+    TargetSelectionMode, ThisWayCause, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -6927,7 +6927,10 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
     ))
     .parse(after_verb_lower)
     {
-        ((StepSkipTarget::CombatPhase, SkipScope::AllOfNextTurn), rest)
+        (
+            (StepSkipTarget::CombatPhase, SkipScope::AllOfNextTurn),
+            rest,
+        )
     } else {
         let (after_next_lower, _) = alt((
             tag::<_, _, OracleError<'_>>("their next "),

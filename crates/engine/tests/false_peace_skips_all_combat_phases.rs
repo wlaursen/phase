@@ -7,13 +7,15 @@
 //! reverted.
 //!
 //! Runtime model (CR 614.10 + CR 614.10a + CR 500.11):
-//! - The effect arms `GameState::combat_phase_skip_next_turn[P] = Pending`.
-//! - `start_next_turn` promotes `Pending -> Active` on P's first NON-skipped
-//!   turn (CR 614.10a: it waits past skipped turns).
-//! - While `Active`, a virtual BeginPhase replacement prevents every combat
+//! - Each effect arms one `pending` skip on `combat_phase_skip_next_turn[P]`.
+//! - `start_next_turn` binds one pending skip (`pending -= 1`, `active = true`)
+//!   on P's first NON-skipped turn (CR 614.10a: it waits past skipped turns).
+//! - While `active`, a virtual BeginPhase replacement prevents every combat
 //!   phase that turn (including extra combat phases).
-//! - `start_next_turn` clears `Active -> None` at the start of P's following
-//!   turn, so combat is normal again.
+//! - `start_next_turn` releases the binding (`active = false`) at the start of
+//!   P's following turn; combat is normal again unless another pending skip
+//!   rebinds. So two stacked skips skip combat on P's next two non-skipped turns
+//!   (CR 614.10a: stacked "skip next" effects are independently satisfied).
 
 use engine::game::effects::skip_next_step;
 use engine::game::turns::{advance_phase, start_next_turn};
@@ -41,16 +43,21 @@ fn skip_all_combat_ability(player: PlayerId) -> ResolvedAbility {
     )
 }
 
-/// Resolve the effect to arm the Pending marker for `player`.
+/// Resolve the effect to arm one more pending skip for `player`. Safe to call
+/// repeatedly (CR 614.10a stacking) — each call increments `pending` by one and
+/// must not bind a turn on its own.
 fn arm_skip(state: &mut GameState, player: PlayerId) {
+    let before = state.combat_phase_skip_next_turn[player.0 as usize].pending;
     let ability = skip_all_combat_ability(player);
     let mut events = Vec::new();
     skip_next_step::resolve(state, &ability, &mut events).expect("skip resolves");
+    let slot = state.combat_phase_skip_next_turn[player.0 as usize];
     assert_eq!(
-        state.combat_phase_skip_next_turn[player.0 as usize],
-        CombatPhaseSkipState::Pending,
-        "effect must arm Pending"
+        slot.pending,
+        before + 1,
+        "effect must arm one more pending skip"
     );
+    assert!(!slot.active, "arming alone must not bind a turn");
 }
 
 /// Drive `advance_phase` from PreCombatMain and report the phase the active
@@ -79,8 +86,11 @@ fn bound_turn_skips_all_combat_phases() {
     assert_eq!(state.active_player, PlayerId(1));
     assert_eq!(
         state.combat_phase_skip_next_turn[1],
-        CombatPhaseSkipState::Active,
-        "Pending must promote to Active on the bound turn"
+        CombatPhaseSkipState {
+            pending: 0,
+            active: true
+        },
+        "the pending skip must bind (active) on the bound turn"
     );
 
     let (phase, combats) = run_combat_segment(&mut state);
@@ -153,8 +163,11 @@ fn combat_skip_waits_past_a_skipped_turn() {
     );
     assert_eq!(
         state.combat_phase_skip_next_turn[1],
-        CombatPhaseSkipState::Pending,
-        "combat skip must still be Pending — it did not bind to the skipped turn"
+        CombatPhaseSkipState {
+            pending: 1,
+            active: false
+        },
+        "combat skip must still be pending — it did not bind to the skipped turn"
     );
 
     // P0's turn (active now) has no marker -> normal combat.
@@ -169,7 +182,10 @@ fn combat_skip_waits_past_a_skipped_turn() {
     assert_eq!(state.active_player, PlayerId(1));
     assert_eq!(
         state.combat_phase_skip_next_turn[1],
-        CombatPhaseSkipState::Active,
+        CombatPhaseSkipState {
+            pending: 0,
+            active: true
+        },
         "combat skip binds to P1's first non-skipped turn"
     );
     let (phase2, combats2) = run_combat_segment(&mut state);
@@ -190,7 +206,10 @@ fn marker_clears_after_bound_turn() {
     assert_eq!(state.active_player, PlayerId(1));
     assert_eq!(
         state.combat_phase_skip_next_turn[1],
-        CombatPhaseSkipState::Active
+        CombatPhaseSkipState {
+            pending: 0,
+            active: true
+        }
     );
     let (phase, combats) = run_combat_segment(&mut state);
     assert_eq!(phase, Phase::PostCombatMain);
@@ -209,7 +228,7 @@ fn marker_clears_after_bound_turn() {
     assert_eq!(state.active_player, PlayerId(1));
     assert_eq!(
         state.combat_phase_skip_next_turn[1],
-        CombatPhaseSkipState::None,
+        CombatPhaseSkipState::default(),
         "marker must be cleared after the bound turn"
     );
     let (phase2, combats2) = run_combat_segment(&mut state);
@@ -228,10 +247,98 @@ fn player_without_marker_has_normal_combat() {
     assert_eq!(state.active_player, PlayerId(1));
     assert_eq!(
         state.combat_phase_skip_next_turn[1],
-        CombatPhaseSkipState::None
+        CombatPhaseSkipState::default()
     );
 
     let (phase, combats) = run_combat_segment(&mut state);
     assert_eq!(phase, Phase::BeginCombat, "no marker -> normal combat");
     assert_eq!(combats, 1);
+}
+
+/// (f) CR 614.10a (the regression guard for stacked skips): two `AllOfNextTurn`
+/// skips aimed at the same player before their next turn make that player skip
+/// combat on their next TWO non-skipped turns — one effect is satisfied by the
+/// first skipped turn, the other waits and binds to the second. This FAILS on
+/// the original single-marker model, which collapsed both into one skipped turn.
+#[test]
+fn two_stacked_skips_skip_combat_on_next_two_turns() {
+    let mut state = GameState::new_two_player(42);
+    state.active_player = PlayerId(0);
+
+    // Two False Peace effects resolve at P1 before their next turn.
+    arm_skip(&mut state, PlayerId(1));
+    arm_skip(&mut state, PlayerId(1));
+    assert_eq!(
+        state.combat_phase_skip_next_turn[1],
+        CombatPhaseSkipState {
+            pending: 2,
+            active: false
+        },
+        "two stacked skips accumulate to pending: 2"
+    );
+
+    // P1's first turn: one skip binds, combat skipped, one still pending.
+    let mut events = Vec::new();
+    start_next_turn(&mut state, &mut events);
+    assert_eq!(state.active_player, PlayerId(1));
+    assert_eq!(
+        state.combat_phase_skip_next_turn[1],
+        CombatPhaseSkipState {
+            pending: 1,
+            active: true
+        },
+        "first turn binds one skip; the second remains pending"
+    );
+    let (phase, combats) = run_combat_segment(&mut state);
+    assert_eq!(phase, Phase::PostCombatMain);
+    assert_eq!(combats, 0, "P1's first turn skips combat");
+
+    // P0's intervening turn (no marker -> normal combat).
+    state.phase = Phase::Cleanup;
+    let mut events2 = Vec::new();
+    start_next_turn(&mut state, &mut events2);
+    assert_eq!(state.active_player, PlayerId(0));
+
+    // P1's SECOND turn: the first binding released, the second skip now binds.
+    state.phase = Phase::Cleanup;
+    let mut events3 = Vec::new();
+    start_next_turn(&mut state, &mut events3);
+    assert_eq!(state.active_player, PlayerId(1));
+    assert_eq!(
+        state.combat_phase_skip_next_turn[1],
+        CombatPhaseSkipState {
+            pending: 0,
+            active: true
+        },
+        "second skip binds to P1's next turn (CR 614.10a)"
+    );
+    let (phase2, combats2) = run_combat_segment(&mut state);
+    assert_eq!(
+        phase2,
+        Phase::PostCombatMain,
+        "P1's second turn also skips combat"
+    );
+    assert_eq!(combats2, 0);
+
+    // P0's turn, then P1's THIRD turn: both skips satisfied -> normal combat.
+    state.phase = Phase::Cleanup;
+    let mut events4 = Vec::new();
+    start_next_turn(&mut state, &mut events4);
+    assert_eq!(state.active_player, PlayerId(0));
+    state.phase = Phase::Cleanup;
+    let mut events5 = Vec::new();
+    start_next_turn(&mut state, &mut events5);
+    assert_eq!(state.active_player, PlayerId(1));
+    assert_eq!(
+        state.combat_phase_skip_next_turn[1],
+        CombatPhaseSkipState::default(),
+        "both skips satisfied; marker cleared"
+    );
+    let (phase3, combats3) = run_combat_segment(&mut state);
+    assert_eq!(
+        phase3,
+        Phase::BeginCombat,
+        "P1's third turn has normal combat"
+    );
+    assert_eq!(combats3, 1);
 }
