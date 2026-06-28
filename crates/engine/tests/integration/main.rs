@@ -419,6 +419,7 @@ mod issue_924_offspring;
 mod issue_927_tireless_provisioner;
 mod issue_934_ring_goes_south;
 mod issue_941_champions_full_party;
+mod issue_haze_frog_other_creature_prevention;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
