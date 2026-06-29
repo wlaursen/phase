@@ -3647,6 +3647,32 @@ mod tests {
     }
 
     #[test]
+    fn apnap_accepts_protection_racket_repeat_for_each_opponent_in_turn_order() {
+        use crate::types::ability::PlayerFilter;
+
+        let parsed = parse_named(
+            "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.",
+            "Protection Racket",
+            &["Enchantment"],
+        );
+        assert_eq!(parsed.triggers.len(), 1);
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Protection Racket upkeep trigger execute");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "Protection Racket trigger must parse without Unimplemented"
+        );
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "repeat-for-each-opponent-in-turn-order must stamp player_scope = Opponent"
+        );
+        assert!(!has_swallowed_detector(&parsed, "APNAP"));
+    }
+
+    #[test]
     fn duration_this_turn_accepts_force_block_scope() {
         let parsed = parse(
             "Target creature blocks target creature this turn if able.",
