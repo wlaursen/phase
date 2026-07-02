@@ -6034,9 +6034,7 @@ mod tests {
         );
         // CR 608.2c demonstrative-subject variants reach the same shape.
         assert_eq!(
-            parse_target_controller_poisoned_condition_text(
-                "that spell's controller is poisoned"
-            ),
+            parse_target_controller_poisoned_condition_text("that spell's controller is poisoned"),
             Some(expected.clone())
         );
 
@@ -6050,10 +6048,9 @@ mod tests {
         assert_eq!(cond, Some(expected));
 
         // Negative: an unrelated "its controller ..." predicate must not match.
-        assert!(parse_target_controller_poisoned_condition_text(
-            "its controller controls a Swamp"
-        )
-        .is_none());
+        let unrelated =
+            parse_target_controller_poisoned_condition_text("its controller controls a Swamp");
+        assert!(unrelated.is_none());
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
